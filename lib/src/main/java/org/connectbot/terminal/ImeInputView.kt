@@ -99,13 +99,10 @@ internal class ImeInputView(
             outAttrs.initialSelEnd = 0
         } else {
             // Normal terminal mode:
-            // - TYPE_TEXT_VARIATION_PASSWORD: Shows password-style keyboard with number rows
-            // - TYPE_TEXT_VARIATION_VISIBLE_PASSWORD: Keeps text visible (we handle display ourselves)
-            // - TYPE_TEXT_FLAG_NO_SUGGESTIONS: Disables autocomplete/suggestions
-            // - TYPE_NULL: No special input processing
-            outAttrs.inputType = EditorInfo.TYPE_NULL or
-                    EditorInfo.TYPE_TEXT_VARIATION_PASSWORD or
-                    EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
+            // Use regular text class so IMEs (notably Gboard) preserve the user's
+            // selected language mode instead of forcing Latin/password layout.
+            // Keep suggestions disabled because terminal input is command-oriented.
+            outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT or
                     EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         }
 
