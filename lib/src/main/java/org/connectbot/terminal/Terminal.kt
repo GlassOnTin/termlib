@@ -1054,8 +1054,10 @@ fun TerminalWithAccessibility(
                                         // callback for each SCROLL_THRESHOLD_PX crossed
                                         accumulatedScrollY += dragAmount.y
                                         while (kotlin.math.abs(accumulatedScrollY) >= SCROLL_THRESHOLD_PX) {
-                                            val scrollUp = accumulatedScrollY < 0
-                                            accumulatedScrollY += if (scrollUp) SCROLL_THRESHOLD_PX else -SCROLL_THRESHOLD_PX
+                                            val draggedUp = accumulatedScrollY < 0
+                                            accumulatedScrollY += if (draggedUp) SCROLL_THRESHOLD_PX else -SCROLL_THRESHOLD_PX
+                                            // Natural scrolling: finger down = scroll up (older content)
+                                            val scrollUp = !draggedUp
                                             val col = (change.position.x / baseCharWidth).toInt()
                                                 .coerceIn(0, screenState.snapshot.cols - 1)
                                             val row = (change.position.y / baseCharHeight).toInt()
@@ -1107,7 +1109,7 @@ fun TerminalWithAccessibility(
                                 // Flush any remaining accumulated scroll that didn't
                                 // reach the threshold — ensures small flicks register.
                                 if (gestureCallback != null && kotlin.math.abs(accumulatedScrollY) > SCROLL_THRESHOLD_PX / 3f) {
-                                    val scrollUp = accumulatedScrollY < 0
+                                    val scrollUp = accumulatedScrollY > 0  // natural: positive drag = scroll up
                                     val col = (down.position.x / baseCharWidth).toInt()
                                         .coerceIn(0, screenState.snapshot.cols - 1)
                                     val row = (down.position.y / baseCharHeight).toInt()
