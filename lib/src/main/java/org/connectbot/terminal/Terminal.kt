@@ -107,11 +107,30 @@ private const val CURSOR_BLINK_RATE_MS = 500L
 private const val WAIT_FOR_SECOND_TOUCH_MS = 40L
 
 /**
- * Long-press delay for text selection in mouse mode (ms).
- * Longer than the interceptor's right-click threshold (400ms) so the
- * user can distinguish right-click (release before 1s) from selection (hold past 1s).
+ * Long-press threshold for the gesture callback (ms).
+ * When a gestureCallback is present, fires onLongPress at this time.
+ * Short enough to feel responsive as a right-click; user must hold past
+ * MOUSE_MODE_SELECTION_DELAY_MS for text selection.
+ */
+private const val CALLBACK_LONG_PRESS_MS = 400L
+
+/**
+ * Long-press delay for text selection when a gesture callback is present (ms).
+ * Longer than CALLBACK_LONG_PRESS_MS so the user can distinguish
+ * callback action (release before 1s) from selection (hold past 1s).
  */
 private const val MOUSE_MODE_SELECTION_DELAY_MS = 1000L
+
+/**
+ * Millis after last multi-touch event to suppress single-touch gestures
+ * from stale finger lift-off after a pinch-to-zoom.
+ */
+private const val MULTITOUCH_LIFTOFF_MS = 300L
+
+/**
+ * Pixels of vertical drag accumulated before emitting one scroll callback event.
+ */
+private const val SCROLL_THRESHOLD_PX = 40f
 
 /**
  * Text selection magnifier loupe size in dp.
@@ -292,7 +311,7 @@ fun Terminal(
     onHyperlinkClick: (String) -> Unit = {},
     onComposeControllerAvailable: ((ComposeController) -> Unit)? = null,
     onFontSizeChanged: ((TextUnit) -> Unit)? = null,
-    mouseMode: Boolean = false,
+    gestureCallback: TerminalGestureCallback? = null,
 ) {
     TerminalWithAccessibility(
         terminalEmulator = terminalEmulator,
@@ -314,7 +333,7 @@ fun Terminal(
         onHyperlinkClick = onHyperlinkClick,
         onComposeControllerAvailable = onComposeControllerAvailable,
         onFontSizeChanged = onFontSizeChanged,
-        mouseMode = mouseMode,
+        gestureCallback = gestureCallback,
     )
 }
 
@@ -346,7 +365,7 @@ fun TerminalWithAccessibility(
     onHyperlinkClick: (String) -> Unit = {},
     onComposeControllerAvailable: ((ComposeController) -> Unit)? = null,
     onFontSizeChanged: ((TextUnit) -> Unit)? = null,
-    mouseMode: Boolean = false,
+    gestureCallback: TerminalGestureCallback? = null,
 ) {
     if (terminalEmulator !is TerminalEmulatorImpl) {
         Box(
@@ -569,6 +588,18 @@ fun TerminalWithAccessibility(
             override fun clearSelection() {
                 selectionManager.clearSelection()
             }
+
+            override fun updateSelectionStart(row: Int, col: Int) {
+                selectionManager.updateSelectionStart(row, col)
+            }
+
+            override fun updateSelectionEnd(row: Int, col: Int) {
+                selectionManager.updateSelectionEnd(row, col)
+            }
+
+            override fun getSelectionRange(): SelectionRange? {
+                return selectionManager.selectionRange
+            }
         }
     }
 
@@ -778,13 +809,18 @@ fun TerminalWithAccessibility(
                     )
             } else {
                 Modifier.fillMaxSize()
-            }).pointerInput(terminalEmulator) {
+            }).pointerInput(terminalEmulator, gestureCallback) {
                 val touchSlopSquared =
                     viewConfiguration.touchSlop * viewConfiguration.touchSlop
+                var lastMultiTouchTime = 0L
                 coroutineScope {
                     awaitEachGesture {
                         var gestureType: GestureType = GestureType.Undetermined
                         val down = awaitFirstDown(requireUnconsumed = false)
+
+                        // Suppress taps/swipes for a window after pinch-to-zoom ends
+                        val sincePinch = System.currentTimeMillis() - lastMultiTouchTime
+                        val inPinchCooldown = sincePinch < MULTITOUCH_LIFTOFF_MS
 
                         // 1. Check if touching a selection handle first
                         if (selectionManager.mode != SelectionMode.NONE && !selectionManager.isSelecting) {
@@ -833,21 +869,44 @@ fun TerminalWithAccessibility(
                             }
                         }
 
-                        // 2. Start long press detection for selection
-                        // Only start selection if no selection is already active.
-                        // In mouse mode the interceptor sends a right-click at 400ms,
-                        // but the system long-press (~500ms) still triggers selection
-                        // so the user can copy text even in TUI apps.
+                        // 2. Long press detection
+                        // When gestureCallback is present, fire onLongPress at 400ms
+                        // then wait until 1000ms for selection start.
+                        // When no callback, use the system long-press timeout for selection.
                         var longPressDetected = false
                         var gestureEnded = false
+                        var callbackLongPressFired = false
+
+                        val callbackLongPressJob = if (gestureCallback != null) {
+                            launch {
+                                delay(CALLBACK_LONG_PRESS_MS)
+                                if (gestureType == GestureType.Undetermined && !gestureEnded) {
+                                    val col = (down.position.x / baseCharWidth).toInt()
+                                        .coerceIn(0, screenState.snapshot.cols - 1)
+                                    val row = (down.position.y / baseCharHeight).toInt()
+                                        .coerceIn(0, screenState.snapshot.rows - 1)
+                                    callbackLongPressFired = true
+                                    gestureCallback.onLongPress(col, row)
+                                    // Note: return value not checked here — selection
+                                    // suppression is handled by the selection job below.
+                                    // The callback fires the right-click; selection
+                                    // starts later at MOUSE_MODE_SELECTION_DELAY_MS.
+                                }
+                            }
+                        } else null
+
                         val longPressJob = launch {
-                            delay(if (mouseMode) MOUSE_MODE_SELECTION_DELAY_MS else viewConfiguration.longPressTimeoutMillis)
+                            delay(
+                                if (gestureCallback != null) MOUSE_MODE_SELECTION_DELAY_MS
+                                else viewConfiguration.longPressTimeoutMillis
+                            )
                             if (gestureType == GestureType.Undetermined &&
                                 selectionManager.mode == SelectionMode.NONE &&
                                 !gestureEnded
                             ) {
                                 longPressDetected = true
                                 gestureType = GestureType.Selection
+                                Log.d("Terminal", "Long-press → Selection started")
 
                                 // Start selection
                                 val col = (down.position.x / baseCharWidth).toInt()
@@ -873,6 +932,7 @@ fun TerminalWithAccessibility(
 
                         if (secondPointer != null && forcedSize == null) {
                             longPressJob.cancel()
+                            callbackLongPressJob?.cancel()
                             gestureType = GestureType.Zoom
 
                             // Pinch-to-zoom: adjust font size directly
@@ -897,6 +957,7 @@ fun TerminalWithAccessibility(
                             // LaunchedEffect from resetting before round-trip.
                             fontSetByPinch = true
                             onFontSizeChanged?.invoke(calculatedFontSize)
+                            lastMultiTouchTime = System.currentTimeMillis()
 
                             return@awaitEachGesture
                         }
@@ -906,6 +967,11 @@ fun TerminalWithAccessibility(
                         velocityTracker.addPosition(down.uptimeMillis, down.position)
 
                         // 5. Event loop for single-touch gestures
+                        // Track accumulated scroll for callback quantization
+                        var accumulatedScrollY = 0f
+                        // Track whether this is a horizontal drag (tab swipe)
+                        var isHorizontalDrag = false
+
                         while (true) {
                             val event: PointerEvent =
                                 awaitPointerEvent(PointerEventPass.Main)
@@ -921,11 +987,24 @@ fun TerminalWithAccessibility(
                             // Determine gesture if still undetermined
                             if (gestureType == GestureType.Undetermined && !longPressDetected) {
                                 if (dragAmount.getDistanceSquared() > touchSlopSquared) {
-                                    longPressJob.cancel()
-                                    gestureType = GestureType.Scroll
-                                    // Clear any active selection when scrolling starts
-                                    if (selectionManager.mode != SelectionMode.NONE) {
-                                        selectionManager.clearSelection()
+                                    val absDx = kotlin.math.abs(change.position.x - down.position.x)
+                                    val absDy = kotlin.math.abs(change.position.y - down.position.y)
+                                    if (absDx > absDy) {
+                                        // Horizontal drag — let it pass through to pager
+                                        isHorizontalDrag = true
+                                        longPressJob.cancel()
+                                        callbackLongPressJob?.cancel()
+                                        // Don't set gestureType — remain Undetermined
+                                        // so we don't consume events and pager can handle tab swiping.
+                                        // But suppress during pinch cooldown.
+                                    } else {
+                                        longPressJob.cancel()
+                                        callbackLongPressJob?.cancel()
+                                        gestureType = GestureType.Scroll
+                                        // Clear any active selection when scrolling starts
+                                        if (selectionManager.mode != SelectionMode.NONE) {
+                                            selectionManager.clearSelection()
+                                        }
                                     }
                                 }
                             }
@@ -933,6 +1012,7 @@ fun TerminalWithAccessibility(
                             // Handle based on gesture type
                             when (gestureType) {
                                 GestureType.Selection -> {
+                                    Log.d("Terminal", "Selection branch: isSelecting=${selectionManager.isSelecting} pos=${change.position}")
                                     if (selectionManager.isSelecting) {
                                         val dragCol =
                                             (change.position.x / baseCharWidth).toInt()
@@ -949,55 +1029,86 @@ fun TerminalWithAccessibility(
                                 }
 
                                 GestureType.Scroll -> {
-                                    // Update scroll offset
-                                    // Drag down (positive dragAmount.y) = view older content (increase scrollbackPosition)
-                                    // Drag up (negative dragAmount.y) = view newer content (decrease scrollbackPosition)
-                                    val newOffset = (scrollOffset.value + dragAmount.y)
-                                        .coerceIn(0f, maxScroll)
-                                    coroutineScope.launch {
-                                        scrollOffset.snapTo(newOffset)
-                                    }
+                                    if (gestureCallback != null) {
+                                        // Quantized scroll: accumulate drag and fire
+                                        // callback for each SCROLL_THRESHOLD_PX crossed
+                                        accumulatedScrollY += dragAmount.y
+                                        while (kotlin.math.abs(accumulatedScrollY) >= SCROLL_THRESHOLD_PX) {
+                                            val scrollUp = accumulatedScrollY < 0
+                                            accumulatedScrollY += if (scrollUp) SCROLL_THRESHOLD_PX else -SCROLL_THRESHOLD_PX
+                                            val col = (change.position.x / baseCharWidth).toInt()
+                                                .coerceIn(0, screenState.snapshot.cols - 1)
+                                            val row = (change.position.y / baseCharHeight).toInt()
+                                                .coerceIn(0, screenState.snapshot.rows - 1)
+                                            val consumed = gestureCallback.onScroll(col, row, scrollUp)
+                                            if (!consumed) {
+                                                // Callback didn't handle it — do scrollback
+                                                val scrollDir = if (scrollUp) 1 else -1
+                                                screenState.scrollBy(scrollDir)
+                                                coroutineScope.launch {
+                                                    scrollOffset.snapTo(
+                                                        screenState.scrollbackPosition * baseCharHeight
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // No callback: smooth pixel-level scrollback
+                                        val newOffset = (scrollOffset.value + dragAmount.y)
+                                            .coerceIn(0f, maxScroll)
+                                        coroutineScope.launch {
+                                            scrollOffset.snapTo(newOffset)
+                                        }
 
-                                    // Update terminal buffer scrollback position
-                                    val scrolledLines =
-                                        (newOffset / baseCharHeight).toInt()
-                                    screenState.scrollBy(scrolledLines - screenState.scrollbackPosition)
+                                        // Update terminal buffer scrollback position
+                                        val scrolledLines =
+                                            (newOffset / baseCharHeight).toInt()
+                                        screenState.scrollBy(scrolledLines - screenState.scrollbackPosition)
+                                    }
                                 }
 
                                 else -> {}
                             }
 
+                            // Always consume on Main pass to prevent the
+                            // HorizontalPager's scrollable from intercepting
+                            // drags. Tab swiping still works because the
+                            // pagerSwipeOverride runs on Initial pass (before Main).
                             change.consume()
                         }
 
                         // 6. Gesture ended - cleanup
                         gestureEnded = true
                         longPressJob.cancel()
+                        callbackLongPressJob?.cancel()
+                        Log.d("Terminal", "Gesture ended: type=$gestureType longPress=$longPressDetected hDrag=$isHorizontalDrag")
 
                         when (gestureType) {
                             GestureType.Scroll -> {
-                                // Apply fling animation
-                                val velocity = velocityTracker.calculateVelocity()
-                                coroutineScope.launch {
-                                    var targetValue = scrollOffset.targetValue
-                                    scrollOffset.animateDecay(
-                                        initialVelocity = velocity.y,
-                                        animationSpec = splineBasedDecay(density)
-                                    ) {
-                                        targetValue = value
-                                        // Update terminal buffer during animation
-                                        val scrolledLines =
-                                            (value / baseCharHeight).toInt()
-                                        screenState.scrollBy(scrolledLines - screenState.scrollbackPosition)
-                                    }
+                                if (gestureCallback == null) {
+                                    // Apply fling animation (only for non-callback scrollback)
+                                    val velocity = velocityTracker.calculateVelocity()
+                                    coroutineScope.launch {
+                                        var targetValue = scrollOffset.targetValue
+                                        scrollOffset.animateDecay(
+                                            initialVelocity = velocity.y,
+                                            animationSpec = splineBasedDecay(density)
+                                        ) {
+                                            targetValue = value
+                                            // Update terminal buffer during animation
+                                            val scrolledLines =
+                                                (value / baseCharHeight).toInt()
+                                            screenState.scrollBy(scrolledLines - screenState.scrollbackPosition)
+                                        }
 
-                                    // Clamp final position if needed
-                                    if (targetValue < 0f) {
-                                        scrollOffset.snapTo(0f)
-                                        screenState.scrollToBottom()
-                                    } else if (targetValue > maxScroll) {
-                                        scrollOffset.snapTo(maxScroll)
-                                        screenState.scrollToTop()
+                                        // Clamp final position if needed
+                                        if (targetValue < 0f) {
+                                            scrollOffset.snapTo(0f)
+                                            screenState.scrollToBottom()
+                                        } else if (targetValue > maxScroll) {
+                                            scrollOffset.snapTo(maxScroll)
+                                            screenState.scrollToTop()
+                                        }
                                     }
                                 }
                             }
@@ -1010,27 +1121,28 @@ fun TerminalWithAccessibility(
                             }
 
                             GestureType.Undetermined -> {
-                                // In mouse mode, taps are handled by the gesture
-                                // interceptor — skip selection/hyperlink/focus here.
-                                if (!mouseMode) {
-                                    // This is a tap. If a selection is active, clear it.
-                                    // Otherwise, check for hyperlink or forward the tap.
-                                    if (selectionManager.mode != SelectionMode.NONE) {
-                                        selectionManager.clearSelection()
-                                    } else {
+                                // No drag occurred — this is a tap
+                                if (isHorizontalDrag || inPinchCooldown) {
+                                    // Horizontal swipe or pinch cooldown — not a tap
+                                } else if (selectionManager.mode != SelectionMode.NONE) {
+                                    selectionManager.clearSelection()
+                                } else {
+                                    val tapCol = (down.position.x / baseCharWidth).toInt()
+                                        .coerceIn(0, screenState.snapshot.cols - 1)
+                                    val tapRow = (down.position.y / baseCharHeight).toInt()
+                                        .coerceIn(0, screenState.snapshot.rows - 1)
+
+                                    // Give callback first chance to handle tap
+                                    val callbackHandled = gestureCallback?.onTap(tapCol, tapRow) == true
+
+                                    if (!callbackHandled) {
                                         // Check if tap is on a hyperlink
-                                        val tapCol = (down.position.x / baseCharWidth).toInt()
-                                            .coerceIn(0, screenState.snapshot.cols - 1)
-                                        val tapRow = (down.position.y / baseCharHeight).toInt()
-                                            .coerceIn(0, screenState.snapshot.rows - 1)
                                         val line = screenState.getVisibleLine(tapRow)
                                         val hyperlinkUrl = line.getHyperlinkUrlAt(tapCol)
 
                                         if (hyperlinkUrl != null) {
-                                            // User tapped on a hyperlink
                                             onHyperlinkClick(hyperlinkUrl)
                                         } else {
-                                            // Request focus when terminal is tapped to show keyboard
                                             if (keyboardEnabled) {
                                                 focusRequester.requestFocus()
                                             }

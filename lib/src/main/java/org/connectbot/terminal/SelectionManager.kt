@@ -81,6 +81,22 @@ interface SelectionController {
      * Clear the selection without copying.
      */
     fun clearSelection()
+
+    /**
+     * Update the start anchor of the selection to the given cell.
+     */
+    fun updateSelectionStart(row: Int, col: Int)
+
+    /**
+     * Update the end anchor of the selection to the given cell.
+     */
+    fun updateSelectionEnd(row: Int, col: Int)
+
+    /**
+     * Get the current selection range as (startRow, startCol, endRow, endCol),
+     * or null if no selection is active.
+     */
+    fun getSelectionRange(): SelectionRange?
 }
 
 enum class SelectionMode {
@@ -89,7 +105,7 @@ enum class SelectionMode {
     LINE
 }
 
-internal data class SelectionRange(
+data class SelectionRange(
     val startRow: Int,
     val startCol: Int,
     val endRow: Int,
