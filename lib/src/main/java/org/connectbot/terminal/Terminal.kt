@@ -122,15 +122,23 @@ private const val CALLBACK_LONG_PRESS_MS = 400L
 private const val MOUSE_MODE_SELECTION_DELAY_MS = 1000L
 
 /**
- * Millis after last multi-touch event to suppress single-touch gestures
- * from stale finger lift-off after a pinch-to-zoom.
+ * Millis after last multi-touch event to suppress tap from stale
+ * finger lift-off after a pinch-to-zoom. Only blocks taps, not
+ * long-press or drag gestures.
  */
-private const val MULTITOUCH_LIFTOFF_MS = 300L
+private const val MULTITOUCH_LIFTOFF_MS = 200L
 
 /**
  * Pixels of vertical drag accumulated before emitting one scroll callback event.
+ * Lower values feel more responsive in TUI apps but send more escape sequences.
  */
-private const val SCROLL_THRESHOLD_PX = 40f
+private const val SCROLL_THRESHOLD_PX = 24f
+
+/**
+ * Fraction of terminal height at top/bottom that triggers edge-scroll
+ * when dragging selection near the boundary.
+ */
+private const val EDGE_SCROLL_ZONE = 0.12f
 
 /**
  * Text selection magnifier loupe size in dp.
@@ -197,10 +205,6 @@ private const val HANDLE_HIT_RADIUS = 50f
  */
 private val MAGNIFIER_VERTICAL_OFFSET = 40.dp
 
-/**
- * Center offset multiplier for magnifier positioning.
- */
-private const val MAGNIFIER_CENTER_OFFSET_MULTIPLIER = 1.2f
 
 /**
  * Border width for the magnifier loupe in dp.
@@ -887,10 +891,6 @@ fun TerminalWithAccessibility(
                                         .coerceIn(0, screenState.snapshot.rows - 1)
                                     callbackLongPressFired = true
                                     gestureCallback.onLongPress(col, row)
-                                    // Note: return value not checked here — selection
-                                    // suppression is handled by the selection job below.
-                                    // The callback fires the right-click; selection
-                                    // starts later at MOUSE_MODE_SELECTION_DELAY_MS.
                                 }
                             }
                         } else null
@@ -906,7 +906,6 @@ fun TerminalWithAccessibility(
                             ) {
                                 longPressDetected = true
                                 gestureType = GestureType.Selection
-                                Log.d("Terminal", "Long-press → Selection started")
 
                                 // Start selection
                                 val col = (down.position.x / baseCharWidth).toInt()
@@ -982,21 +981,31 @@ fun TerminalWithAccessibility(
                                 change.uptimeMillis,
                                 change.position
                             )
-                            val dragAmount = change.positionChange()
+                            // Use raw position delta — positionChange() may return
+                            // zero if pagerSwipeOverride consumed on Initial pass.
+                            val dragAmount = change.position - change.previousPosition
 
-                            // Determine gesture if still undetermined
-                            if (gestureType == GestureType.Undetermined && !longPressDetected) {
-                                if (dragAmount.getDistanceSquared() > touchSlopSquared) {
-                                    val absDx = kotlin.math.abs(change.position.x - down.position.x)
-                                    val absDy = kotlin.math.abs(change.position.y - down.position.y)
+                            // Determine gesture if still undetermined.
+                            // Use total distance from touch-down (not per-frame delta)
+                            // so moderate-speed scrolling still triggers classification.
+                            // Skip once long-press or callback has fired — the user is
+                            // holding intentionally and movement should extend selection.
+                            if (gestureType == GestureType.Undetermined &&
+                                !longPressDetected && !callbackLongPressFired
+                            ) {
+                                val totalDx = change.position.x - down.position.x
+                                val totalDy = change.position.y - down.position.y
+                                if (totalDx * totalDx + totalDy * totalDy > touchSlopSquared) {
+                                    val absDx = kotlin.math.abs(totalDx)
+                                    val absDy = kotlin.math.abs(totalDy)
                                     if (absDx > absDy) {
-                                        // Horizontal drag — let it pass through to pager
+                                        // Horizontal drag — clear stale selection, let pager handle
                                         isHorizontalDrag = true
                                         longPressJob.cancel()
                                         callbackLongPressJob?.cancel()
-                                        // Don't set gestureType — remain Undetermined
-                                        // so we don't consume events and pager can handle tab swiping.
-                                        // But suppress during pinch cooldown.
+                                        if (selectionManager.mode != SelectionMode.NONE) {
+                                            selectionManager.clearSelection()
+                                        }
                                     } else {
                                         longPressJob.cancel()
                                         callbackLongPressJob?.cancel()
@@ -1012,7 +1021,6 @@ fun TerminalWithAccessibility(
                             // Handle based on gesture type
                             when (gestureType) {
                                 GestureType.Selection -> {
-                                    Log.d("Terminal", "Selection branch: isSelecting=${selectionManager.isSelecting} pos=${change.position}")
                                     if (selectionManager.isSelecting) {
                                         val dragCol =
                                             (change.position.x / baseCharWidth).toInt()
@@ -1025,6 +1033,18 @@ fun TerminalWithAccessibility(
                                             dragCol
                                         )
                                         magnifierPosition = change.position
+
+                                        // Edge-scroll: when dragging near top/bottom
+                                        // during selection, fire scroll callback so TUI
+                                        // apps scroll the underlying content.
+                                        if (gestureCallback != null) {
+                                            val relY = change.position.y /
+                                                (screenState.snapshot.rows * baseCharHeight)
+                                            if (relY < EDGE_SCROLL_ZONE || relY > 1f - EDGE_SCROLL_ZONE) {
+                                                val scrollUp = relY < EDGE_SCROLL_ZONE
+                                                gestureCallback.onScroll(dragCol, dragRow, scrollUp)
+                                            }
+                                        }
                                     }
                                 }
 
@@ -1081,11 +1101,28 @@ fun TerminalWithAccessibility(
                         gestureEnded = true
                         longPressJob.cancel()
                         callbackLongPressJob?.cancel()
-                        Log.d("Terminal", "Gesture ended: type=$gestureType longPress=$longPressDetected hDrag=$isHorizontalDrag")
 
                         when (gestureType) {
                             GestureType.Scroll -> {
-                                if (gestureCallback == null) {
+                                // Flush any remaining accumulated scroll that didn't
+                                // reach the threshold — ensures small flicks register.
+                                if (gestureCallback != null && kotlin.math.abs(accumulatedScrollY) > SCROLL_THRESHOLD_PX / 3f) {
+                                    val scrollUp = accumulatedScrollY < 0
+                                    val col = (down.position.x / baseCharWidth).toInt()
+                                        .coerceIn(0, screenState.snapshot.cols - 1)
+                                    val row = (down.position.y / baseCharHeight).toInt()
+                                        .coerceIn(0, screenState.snapshot.rows - 1)
+                                    val consumed = gestureCallback.onScroll(col, row, scrollUp)
+                                    if (!consumed) {
+                                        val scrollDir = if (scrollUp) 1 else -1
+                                        screenState.scrollBy(scrollDir)
+                                        coroutineScope.launch {
+                                            scrollOffset.snapTo(
+                                                screenState.scrollbackPosition * baseCharHeight
+                                            )
+                                        }
+                                    }
+                                } else if (gestureCallback == null) {
                                     // Apply fling animation (only for non-callback scrollback)
                                     val velocity = velocityTracker.calculateVelocity()
                                     coroutineScope.launch {
@@ -1094,20 +1131,17 @@ fun TerminalWithAccessibility(
                                             initialVelocity = velocity.y,
                                             animationSpec = splineBasedDecay(density)
                                         ) {
-                                            targetValue = value
+                                            targetValue = value.coerceIn(0f, maxScroll)
                                             // Update terminal buffer during animation
                                             val scrolledLines =
-                                                (value / baseCharHeight).toInt()
+                                                (targetValue / baseCharHeight).toInt()
                                             screenState.scrollBy(scrolledLines - screenState.scrollbackPosition)
                                         }
 
-                                        // Clamp final position if needed
-                                        if (targetValue < 0f) {
-                                            scrollOffset.snapTo(0f)
+                                        // Snap to final clamped position
+                                        scrollOffset.snapTo(targetValue.coerceIn(0f, maxScroll))
+                                        if (targetValue <= 0f) {
                                             screenState.scrollToBottom()
-                                        } else if (targetValue > maxScroll) {
-                                            scrollOffset.snapTo(maxScroll)
-                                            screenState.scrollToTop()
                                         }
                                     }
                                 }
@@ -1122,8 +1156,11 @@ fun TerminalWithAccessibility(
 
                             GestureType.Undetermined -> {
                                 // No drag occurred — this is a tap
-                                if (isHorizontalDrag || inPinchCooldown) {
-                                    // Horizontal swipe or pinch cooldown — not a tap
+                                if (isHorizontalDrag) {
+                                    // Horizontal swipe — not a tap (selection already
+                                    // cleared during classification above)
+                                } else if (inPinchCooldown) {
+                                    // Suppress accidental taps from pinch finger liftoff
                                 } else if (selectionManager.mode != SelectionMode.NONE) {
                                     selectionManager.clearSelection()
                                 } else {
@@ -1572,10 +1609,12 @@ private fun MagnifyingGlass(
         y = (position.y - verticalOffset - magnifierSizePx).coerceAtLeast(0f)
     )
 
-    // The actual touch point that should be centered in the magnifier
+    // Compute the terminal-coordinate origin that maps the touch point
+    // to the center of the magnifier. scale() uses the Canvas center as
+    // pivot, so the offset is simply position minus half the magnifier.
     val centerOffset = Offset(
-        x = position.x - (magnifierSizePx / magnifierScale) * MAGNIFIER_CENTER_OFFSET_MULTIPLIER,
-        y = position.y - (magnifierSizePx / magnifierScale) * MAGNIFIER_CENTER_OFFSET_MULTIPLIER,
+        x = position.x - magnifierSizePx / 2f,
+        y = position.y - magnifierSizePx / 2f,
     )
 
     Box(
