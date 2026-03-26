@@ -145,7 +145,8 @@ class TerminalEmulatorFactory {
             onBell: (() -> Unit)? = null,
             onResize: ((TerminalDimensions) -> Unit)? = null,
             onClipboardCopy: ((String) -> Unit)? = null,
-            onProgressChange: ((ProgressState, Int) -> Unit)? = null
+            onProgressChange: ((ProgressState, Int) -> Unit)? = null,
+            enableAltScreen: Boolean = true,
         ): TerminalEmulator {
             return TerminalEmulatorImpl(
                 looper = looper,
@@ -157,7 +158,8 @@ class TerminalEmulatorFactory {
                 onBell = onBell,
                 onResize = onResize,
                 onClipboardCopy = onClipboardCopy,
-                onProgressChange = onProgressChange
+                onProgressChange = onProgressChange,
+                enableAltScreen = enableAltScreen,
             )
         }
     }
@@ -203,7 +205,8 @@ internal class TerminalEmulatorImpl(
     private val onBell: (() -> Unit)? = null,
     private val onResize: ((TerminalDimensions) -> Unit)? = null,
     private val onClipboardCopy: ((String) -> Unit)? = null,
-    private val onProgressChange: ((ProgressState, Int) -> Unit)? = null
+    private val onProgressChange: ((ProgressState, Int) -> Unit)? = null,
+    private val enableAltScreen: Boolean = true,
 ) : TerminalEmulator, TerminalCallbacks {
 
     // Handler for escaping native mutex
@@ -266,7 +269,7 @@ internal class TerminalEmulatorImpl(
 
     // Native terminal instance - MUST be initialized AFTER damageLock and other state
     private val terminalNative by lazy {
-        TerminalNative(this).apply {
+        TerminalNative(this, enableAltScreen).apply {
             resize(initialRows, initialCols)
         }
     }

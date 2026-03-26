@@ -32,11 +32,11 @@ import java.nio.ByteBuffer
  * - Callbacks MUST NOT call back into Terminal methods (will deadlock)
  * - Safe to call from multiple threads (serialized by native mutex)
  */
-internal class TerminalNative(callbacks: TerminalCallbacks) : AutoCloseable {
+internal class TerminalNative(callbacks: TerminalCallbacks, enableAltScreen: Boolean = true) : AutoCloseable {
     private var nativePtr: Long = 0
 
     init {
-        nativePtr = nativeInit(callbacks)
+        nativePtr = nativeInit(callbacks, enableAltScreen)
         if (nativePtr == 0L) {
             throw RuntimeException("Failed to initialize native terminal")
         }
@@ -191,7 +191,7 @@ internal class TerminalNative(callbacks: TerminalCallbacks) : AutoCloseable {
     }
 
     // Native method declarations
-    private external fun nativeInit(callbacks: TerminalCallbacks): Long
+    private external fun nativeInit(callbacks: TerminalCallbacks, enableAltScreen: Boolean): Long
     private external fun nativeDestroy(ptr: Long): Int
     private external fun nativeWriteInputBuffer(ptr: Long, buffer: ByteBuffer, length: Int): Int
     private external fun nativeWriteInputArray(ptr: Long, data: ByteArray, offset: Int, length: Int): Int

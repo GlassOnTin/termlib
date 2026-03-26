@@ -31,10 +31,10 @@ static thread_local jcharArray tls_charArray = nullptr;
 static thread_local jsize tls_charArraySize = 0;
 
 // Terminal implementation
-Terminal::Terminal(JNIEnv* env, jobject callbacks, int rows, int cols)
+Terminal::Terminal(JNIEnv* env, jobject callbacks, int rows, int cols, bool enableAltScreen)
     : mRows(rows), mCols(cols) {
 
-    LOGD("Terminal constructor: rows=%d, cols=%d", rows, cols);
+    LOGD("Terminal constructor: rows=%d, cols=%d, altscreen=%d", rows, cols, enableAltScreen);
 
     // Get JavaVM for callback invocations from any thread
     env->GetJavaVM(&mJavaVM);
@@ -181,7 +181,9 @@ Terminal::Terminal(JNIEnv* env, jobject callbacks, int rows, int cols)
 
     // Get screen and set up callbacks
     mVts = vterm_obtain_screen(mVt);
-    vterm_screen_enable_altscreen(mVts, 1);
+    if (enableAltScreen) {
+        vterm_screen_enable_altscreen(mVts, 1);
+    }
 
     // Initialize callback structure as member variable so it doesn't go out of scope
     mScreenCallbacks = {
@@ -1141,8 +1143,8 @@ void Terminal::resolveColor(const VTermColor& color, uint8_t& r, uint8_t& g, uin
 extern "C" {
 
 JNIEXPORT jlong JNICALL
-Java_org_connectbot_terminal_TerminalNative_nativeInit(JNIEnv* env, jobject /* thiz */, jobject callbacks) {
-    auto* term = new Terminal(env, callbacks);
+Java_org_connectbot_terminal_TerminalNative_nativeInit(JNIEnv* env, jobject /* thiz */, jobject callbacks, jboolean enableAltScreen) {
+    auto* term = new Terminal(env, callbacks, 24, 80, enableAltScreen);
     return reinterpret_cast<jlong>(term);
 }
 
