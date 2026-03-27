@@ -223,7 +223,8 @@ internal class ImeInputView(
 
         override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
             val committedText = text?.toString() ?: ""
-            super.commitText(text, newCursorPosition)
+            // Do NOT call super.commitText() — it dispatches key events to the View,
+            // causing double input. We handle the text ourselves via sendTextInput().
 
             if (committedText.isNotEmpty()) {
                 if (composingText.isNotEmpty()) {
