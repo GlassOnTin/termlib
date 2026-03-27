@@ -551,22 +551,11 @@ internal class TerminalEmulatorImpl(
             }
             scrollbackDirty = true
 
-            // SECOND: Shift semantic segments up by 1 row (line N's segments move to line N-1)
-            // This simulates what happens when the screen scrolls up
-            if (currentLines.size > 1) {
-                val newLines = currentLines.toMutableList()
-                // Shift segments from line N to line N-1
-                for (row in 0 until currentLines.size - 1) {
-                    newLines[row] = currentLines[row].copy(
-                        semanticSegments = currentLines[row + 1].semanticSegments
-                    )
-                }
-                // Clear segments for the last line (new empty line at bottom)
-                newLines[currentLines.size - 1] = currentLines[currentLines.size - 1].copy(
-                    semanticSegments = emptyList()
-                )
-                currentLines = newLines
-            }
+            // Note: semantic segment shifting removed — it incorrectly shifted
+            // ALL lines including those outside the scroll region (e.g. tmux
+            // status bar), causing scrollback corruption. Segments for the
+            // scrolled-out line are already preserved in line0Segments above.
+            // updateLine() preserves existing segments when refreshing cells.
 
             propertyChanged = true
             if (!damagePosted) {
