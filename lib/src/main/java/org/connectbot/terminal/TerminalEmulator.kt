@@ -439,10 +439,14 @@ internal class TerminalEmulatorImpl(
         return 0
     }
 
+    // Track the last moverect source region so pushScrollbackLine knows
+    // whether it was a full-screen or partial scroll region scroll.
+    private var lastMoveRectSrc: TermRect? = null
+
     override fun moverect(dest: TermRect, src: TermRect): Int {
-        // Note: Segment shifting is handled in pushScrollbackLine to ensure correct ordering.
-        // moverect is called BEFORE pushScrollbackLine, so we can't shift segments here
-        // or pushScrollbackLine would get the wrong segments for line 0.
+        // Save source rect — pushScrollbackLine uses it to limit segment shifting
+        // to lines within the scroll region (avoiding corruption of tmux status bars etc.)
+        lastMoveRectSrc = src
         // Treat moverect as damage on the destination
         return damage(dest.startRow, dest.endRow, dest.startCol, dest.endCol)
     }
@@ -551,11 +555,32 @@ internal class TerminalEmulatorImpl(
             }
             scrollbackDirty = true
 
-            // Note: semantic segment shifting removed — it incorrectly shifted
-            // ALL lines including those outside the scroll region (e.g. tmux
-            // status bar), causing scrollback corruption. Segments for the
-            // scrolled-out line are already preserved in line0Segments above.
-            // updateLine() preserves existing segments when refreshing cells.
+            // Shift semantic segments up within the scroll region only.
+            // Lines outside the region (e.g. tmux status bar) keep their segments.
+            val moveRect = lastMoveRectSrc
+            lastMoveRectSrc = null
+            if (currentLines.size > 1) {
+                val shiftEnd = if (moveRect != null) {
+                    // Partial scroll region: only shift within the region
+                    moveRect.endRow.coerceAtMost(currentLines.size)
+                } else {
+                    // Full-screen scroll
+                    currentLines.size
+                }
+                val newLines = currentLines.toMutableList()
+                for (row in 0 until shiftEnd - 1) {
+                    newLines[row] = currentLines[row].copy(
+                        semanticSegments = currentLines[row + 1].semanticSegments
+                    )
+                }
+                // Clear segments for the last line in the scroll region
+                if (shiftEnd > 0 && shiftEnd <= currentLines.size) {
+                    newLines[shiftEnd - 1] = currentLines[shiftEnd - 1].copy(
+                        semanticSegments = emptyList()
+                    )
+                }
+                currentLines = newLines
+            }
 
             propertyChanged = true
             if (!damagePosted) {
