@@ -209,7 +209,13 @@ internal class ImeInputView(
             return true
         }
 
+        // Guard: when true, sendKeyEvent is suppressed to prevent double input
+        // from BaseInputConnection.commitText() dispatching key events AND
+        // our sendTextInput() both sending the same characters.
+        private var suppressKeyEvents = false
+
         override fun sendKeyEvent(event: KeyEvent): Boolean {
+            if (suppressKeyEvents) return true
             val result = this@ImeInputView.dispatchKeyEvent(event)
             // After any key event, clear the IME's text buffer and reset the selection to (0,0).
             // This prevents Gboard from accumulating terminal input into its suggestion context
@@ -223,8 +229,12 @@ internal class ImeInputView(
 
         override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
             val committedText = text?.toString() ?: ""
-            // Do NOT call super.commitText() — it dispatches key events to the View,
-            // causing double input. We handle the text ourselves via sendTextInput().
+            // super.commitText() updates the Editable state (needed for IME sync)
+            // but also dispatches key events via sendKeyEvent(). Suppress those
+            // to avoid double input — we send the text ourselves via sendTextInput().
+            suppressKeyEvents = true
+            super.commitText(text, newCursorPosition)
+            suppressKeyEvents = false
 
             if (committedText.isNotEmpty()) {
                 if (composingText.isNotEmpty()) {
