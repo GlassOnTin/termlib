@@ -308,6 +308,7 @@ fun Terminal(
     showSoftKeyboard: Boolean = true,
     focusRequester: FocusRequester = remember { FocusRequester() },
     onTerminalTap: () -> Unit = {},
+    onTerminalDoubleTap: () -> Unit = {},
     onImeVisibilityChanged: (Boolean) -> Unit = {},
     forcedSize: Pair<Int, Int>? = null,
     modifierManager: ModifierManager? = null,
@@ -330,6 +331,7 @@ fun Terminal(
         showSoftKeyboard = showSoftKeyboard,
         focusRequester = focusRequester,
         onTerminalTap = onTerminalTap,
+        onTerminalDoubleTap = onTerminalDoubleTap,
         onImeVisibilityChanged = onImeVisibilityChanged,
         forcedSize = forcedSize,
         modifierManager = modifierManager,
@@ -361,6 +363,7 @@ fun TerminalWithAccessibility(
     showSoftKeyboard: Boolean = true,
     focusRequester: FocusRequester = remember { FocusRequester() },
     onTerminalTap: () -> Unit = {},
+    onTerminalDoubleTap: () -> Unit = {},
     onImeVisibilityChanged: (Boolean) -> Unit = {},
     forcedSize: Pair<Int, Int>? = null,
     modifierManager: ModifierManager? = null,
@@ -817,6 +820,7 @@ fun TerminalWithAccessibility(
                 val touchSlopSquared =
                     viewConfiguration.touchSlop * viewConfiguration.touchSlop
                 var lastMultiTouchTime = 0L
+                var lastTapTime = 0L
                 coroutineScope {
                     awaitEachGesture {
                         var gestureType: GestureType = GestureType.Undetermined
@@ -1184,7 +1188,14 @@ fun TerminalWithAccessibility(
                                             if (keyboardEnabled) {
                                                 focusRequester.requestFocus()
                                             }
-                                            onTerminalTap()
+                                            val now = System.currentTimeMillis()
+                                            if (now - lastTapTime < 300) {
+                                                onTerminalDoubleTap()
+                                                lastTapTime = 0L
+                                            } else {
+                                                onTerminalTap()
+                                                lastTapTime = now
+                                            }
                                         }
                                     }
                                 }
