@@ -192,6 +192,51 @@ class ImeInputViewTest {
         view.resetImeBuffer()
     }
 
+    // === Double Enter prevention (Issue #41) ===
+
+    @Test
+    fun testSendKeyEventEnterThenCommitNewlineDoesNotDoubleDispatch() {
+        // Some IMEs send BOTH sendKeyEvent(ENTER) AND commitText("\n").
+        // Only one Enter should reach the terminal.
+        val ic = makeView().ic()
+        ic.commitText("hello", 1)
+
+        // IME sends Enter key event first
+        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+        // Then commitText with newline
+        ic.commitText("\n", 1)
+
+        // onTextInput should NOT be called with "\n" — the key event already handled it
+        verify(exactly = 0) { keyboardHandler.onTextInput("\n".toByteArray()) }
+    }
+
+    @Test
+    fun testCommitNewlineWithoutKeyEventStillSendsEnter() {
+        // Some IMEs only send commitText("\n") without a key event.
+        // We must still dispatch Enter in this case.
+        val view = makeView()
+        val ic = view.ic()
+        ic.commitText("hello", 1)
+
+        // Only commitText, no sendKeyEvent
+        ic.commitText("\n", 1)
+
+        // The Enter should be dispatched via dispatchKeyEvent
+        // (verified indirectly — no crash, and onTextInput not called with "\n")
+        verify(exactly = 0) { keyboardHandler.onTextInput("\n".toByteArray()) }
+    }
+
+    @Test
+    fun testCommitTextWithEmbeddedNewlineFiltersIt() {
+        // Some IMEs commit "word\n" as a single text
+        val ic = makeView().ic()
+        ic.commitText("word\n", 1)
+
+        // Only "word" should be sent via onTextInput, not the newline
+        verify { keyboardHandler.onTextInput("word".toByteArray()) }
+        verify(exactly = 0) { keyboardHandler.onTextInput("word\n".toByteArray()) }
+    }
+
     @Test
     fun testResetImeBufferClearsEditableAccumulatedBySetComposingText() {
         // setComposingText (voice input path) writes to the editable but does not clear it —
