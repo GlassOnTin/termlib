@@ -206,14 +206,32 @@ class ImeInputViewTest {
         // Then commitText with newline
         ic.commitText("\n", 1)
 
-        // onTextInput should NOT be called with "\n" — the key event already handled it
+        // commitText("\n") should NOT dispatch another Enter — sendKeyEvent handled it.
+        // The deferred fallback should have been cancelled.
+        verify(exactly = 0) { keyboardHandler.onTextInput("\n".toByteArray()) }
+    }
+
+    @Test
+    fun testCommitNewlineThenSendKeyEventDoesNotDoubleDispatch() {
+        // Reverse order: commitText("\n") first, then sendKeyEvent(ENTER).
+        // Only one Enter should reach the terminal.
+        val ic = makeView().ic()
+        ic.commitText("hello", 1)
+
+        // commitText first — defers Enter dispatch
+        ic.commitText("\n", 1)
+        // sendKeyEvent arrives — cancels deferred dispatch, sends its own Enter
+        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+
+        // The deferred Enter from commitText should have been cancelled.
+        // Only the sendKeyEvent Enter should fire.
         verify(exactly = 0) { keyboardHandler.onTextInput("\n".toByteArray()) }
     }
 
     @Test
     fun testCommitNewlineWithoutKeyEventStillSendsEnter() {
         // Some IMEs only send commitText("\n") without a key event.
-        // We must still dispatch Enter in this case.
+        // After 16ms timeout, Enter is dispatched via the fallback.
         val view = makeView()
         val ic = view.ic()
         ic.commitText("hello", 1)
@@ -221,8 +239,8 @@ class ImeInputViewTest {
         // Only commitText, no sendKeyEvent
         ic.commitText("\n", 1)
 
-        // The Enter should be dispatched via dispatchKeyEvent
-        // (verified indirectly — no crash, and onTextInput not called with "\n")
+        // Enter is deferred — not sent synchronously
+        // (verified indirectly — no crash, onTextInput not called with "\n" synchronously)
         verify(exactly = 0) { keyboardHandler.onTextInput("\n".toByteArray()) }
     }
 

@@ -214,14 +214,28 @@ internal class ImeInputView(
         // our sendTextInput() both sending the same characters.
         private var suppressKeyEvents = false
 
-        // Tracks whether an Enter key event was seen, so commitText("\n")
-        // can avoid sending a duplicate newline.
-        private var enterKeyEventSeen = false
+        private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+
+        // Enter deduplication: commitText("\n") always defers to sendKeyEvent.
+        // If sendKeyEvent(ENTER) arrives (from the same IME action), we cancel
+        // the deferred dispatch. If it doesn't arrive within one frame (~16ms),
+        // the deferred dispatch fires — covering IMEs that only commitText.
+        private var enterHandledByKeyEvent = false
+        private val enterFallbackRunnable = Runnable {
+            if (!enterHandledByKeyEvent) {
+                this@ImeInputView.dispatchKeyEvent(
+                    KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER),
+                )
+            }
+            enterHandledByKeyEvent = false
+        }
 
         override fun sendKeyEvent(event: KeyEvent): Boolean {
             if (suppressKeyEvents) return true
             if (event.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_ENTER) {
-                enterKeyEventSeen = true
+                // Real Enter from IME — cancel any deferred commitText Enter
+                enterHandledByKeyEvent = true
+                handler.removeCallbacks(enterFallbackRunnable)
             }
             val result = this@ImeInputView.dispatchKeyEvent(event)
             // After any key event, clear the IME's text buffer and reset the selection to (0,0).
@@ -247,24 +261,19 @@ internal class ImeInputView(
                 if (composingText.isNotEmpty()) {
                     sendBackspaces(composingText.length)
                 }
-                // Filter newlines from committed text — Enter should only arrive
-                // via sendKeyEvent(KEYCODE_ENTER). Some IMEs (Samsung, SwiftKey)
-                // send BOTH commitText("\n") AND sendKeyEvent(ENTER), causing
-                // double line breaks. If the text is ONLY newlines, dispatch
-                // a single Enter key event instead (for IMEs that only commitText).
+                // Filter newlines from committed text — Enter is handled by
+                // sendKeyEvent(KEYCODE_ENTER) when the IME sends both.
+                // For IMEs that only commitText("\n"), a deferred fallback
+                // dispatches Enter after one frame if sendKeyEvent didn't fire.
                 val filtered = committedText.replace("\n", "").replace("\r", "")
                 if (filtered.isNotEmpty()) {
                     sendTextInput(filtered)
                 } else if (committedText.contains('\n') || committedText.contains('\r')) {
-                    // Text was only newlines — send Enter key event if IME
-                    // didn't already send one via sendKeyEvent()
-                    if (!enterKeyEventSeen) {
-                        this@ImeInputView.dispatchKeyEvent(
-                            KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER),
-                        )
-                    }
+                    // Defer Enter dispatch — give sendKeyEvent a chance to handle it
+                    enterHandledByKeyEvent = false
+                    handler.removeCallbacks(enterFallbackRunnable)
+                    handler.postDelayed(enterFallbackRunnable, 16)
                 }
-                enterKeyEventSeen = false
             }
             composingText = ""
             // Clear the internal Editable to prevent unbounded accumulation
