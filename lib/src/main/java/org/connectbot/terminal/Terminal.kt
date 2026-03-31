@@ -32,7 +32,9 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.drag
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
@@ -117,9 +119,9 @@ private const val CALLBACK_LONG_PRESS_MS = 400L
 /**
  * Long-press delay for text selection when a gesture callback is present (ms).
  * Longer than CALLBACK_LONG_PRESS_MS so the user can distinguish
- * callback action (release before 1s) from selection (hold past 1s).
+ * callback action (release before 500ms) from selection (hold past 500ms).
  */
-private const val MOUSE_MODE_SELECTION_DELAY_MS = 1000L
+private const val MOUSE_MODE_SELECTION_DELAY_MS = 500L
 
 /**
  * Millis after last multi-touch event to suppress tap from stale
@@ -1326,21 +1328,22 @@ fun TerminalWithAccessibility(
             )
         }
 
-        // Copy button when text is selected
+        // Action buttons when text is selected
         if (selectionManager.mode != SelectionMode.NONE && !selectionManager.isSelecting) {
             val range = selectionManager.selectionRange
             if (range != null) {
-                // Position copy button above the selection
+                // Position buttons above the selection
                 val endPosition = range.getEndPosition()
                 val buttonX = endPosition.second * baseCharWidth
                 val buttonY = endPosition.first * baseCharHeight - with(density) { COPY_BUTTON_OFFSET.toPx() }
 
-                Box(
+                Row(
                     modifier = Modifier
                         .offset(
                             x = with(density) { buttonX.toDp() },
                             y = with(density) { buttonY.coerceAtLeast(0f).toDp() }
-                        )
+                        ),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     FloatingActionButton(
                         onClick = {
@@ -1354,6 +1357,20 @@ fun TerminalWithAccessibility(
                         contentColor = Color.Black
                     ) {
                         Text("Copy", style = MaterialTheme.typography.labelSmall)
+                    }
+                    FloatingActionButton(
+                        onClick = {
+                            val text = clipboardManager.getText()?.text
+                            if (!text.isNullOrEmpty()) {
+                                selectionManager.clearSelection()
+                                terminalEmulator.writeInput(text.toByteArray())
+                            }
+                        },
+                        modifier = Modifier.size(COPY_BUTTON_SIZE),
+                        containerColor = Color.White,
+                        contentColor = Color.Black
+                    ) {
+                        Text("Paste", style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }
