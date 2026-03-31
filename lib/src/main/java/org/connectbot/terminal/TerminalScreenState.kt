@@ -146,7 +146,19 @@ internal class TerminalScreenState(
      * @param newSnapshot The new snapshot to use
      */
     internal fun updateSnapshot(newSnapshot: TerminalSnapshot) {
+        val oldScrollbackSize = snapshot.scrollback.size
+        val newScrollbackSize = newSnapshot.scrollback.size
         snapshot = newSnapshot
+
+        // Adjust scroll position when scrollback size changes (e.g. terminal resize).
+        // If user was at the bottom, keep them there.
+        // If scrolled up, adjust by the delta so the same content stays visible.
+        if (scrollbackPosition == 0) {
+            // At bottom — stay at bottom (no adjustment needed)
+        } else {
+            val delta = newScrollbackSize - oldScrollbackSize
+            scrollbackPosition = (scrollbackPosition + delta).coerceIn(0, newScrollbackSize)
+        }
     }
 }
 
