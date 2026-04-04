@@ -87,6 +87,18 @@ class SelectionControllerTest {
             override fun clearSelection() {
                 selectionManager.clearSelection()
             }
+
+            override fun updateSelectionStart(row: Int, col: Int) {
+                selectionManager.updateSelectionStart(row, col)
+            }
+
+            override fun updateSelectionEnd(row: Int, col: Int) {
+                selectionManager.updateSelectionEnd(row, col)
+            }
+
+            override fun getSelectionRange(): SelectionRange? {
+                return selectionManager.selectionRange
+            }
         }
     }
 

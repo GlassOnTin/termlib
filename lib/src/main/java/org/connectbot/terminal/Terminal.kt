@@ -1108,7 +1108,6 @@ fun TerminalWithAccessibility(
                         gestureEnded = true
                         longPressJob.cancel()
                         callbackLongPressJob?.cancel()
-
                         when (gestureType) {
                             GestureType.Scroll -> {
                                 // Flush any remaining accumulated scroll that didn't
@@ -1176,17 +1175,18 @@ fun TerminalWithAccessibility(
                                     val tapRow = (down.position.y / baseCharHeight).toInt()
                                         .coerceIn(0, screenState.snapshot.rows - 1)
 
-                                    // Give callback first chance to handle tap
-                                    val callbackHandled = gestureCallback?.onTap(tapCol, tapRow) == true
+                                    // Check hyperlinks first — they take priority over
+                                    // mouse mode callbacks so URLs are always tappable.
+                                    val line = screenState.getVisibleLine(tapRow)
+                                    val hyperlinkUrl = line.getHyperlinkUrlAt(tapCol)
 
-                                    if (!callbackHandled) {
-                                        // Check if tap is on a hyperlink
-                                        val line = screenState.getVisibleLine(tapRow)
-                                        val hyperlinkUrl = line.getHyperlinkUrlAt(tapCol)
+                                    if (hyperlinkUrl != null) {
+                                        onHyperlinkClick(hyperlinkUrl)
+                                    } else {
+                                        // Give callback chance to handle tap (mouse mode)
+                                        val callbackHandled = gestureCallback?.onTap(tapCol, tapRow) == true
 
-                                        if (hyperlinkUrl != null) {
-                                            onHyperlinkClick(hyperlinkUrl)
-                                        } else {
+                                        if (!callbackHandled) {
                                             if (keyboardEnabled) {
                                                 focusRequester.requestFocus()
                                             }
