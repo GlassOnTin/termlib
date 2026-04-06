@@ -112,6 +112,55 @@ internal class TerminalScreenState(
     }
 
     /**
+     * Get the hyperlink URL at a visible row/col, handling URLs that span
+     * soft-wrapped lines. Joins consecutive soft-wrapped lines before URL
+     * detection so that long URLs wrapping across lines are matched fully.
+     */
+    fun getHyperlinkUrlAt(row: Int, col: Int): String? {
+        val line = getVisibleLine(row)
+
+        // OSC 8 segments always take priority (they don't span lines)
+        val osc8 = line.semanticSegments.firstOrNull {
+            it.semanticType == SemanticType.HYPERLINK && it.contains(col)
+        }?.metadata
+        if (osc8 != null) return osc8
+
+        // Build the joined text from consecutive soft-wrapped lines
+        // Walk backward to find the first line in this soft-wrap group
+        var startRow = row
+        while (startRow > 0) {
+            val prev = getVisibleLine(startRow - 1)
+            if (!prev.softWrapped) break
+            startRow--
+        }
+        // Walk forward to find the last line
+        var endRow = row
+        while (getVisibleLine(endRow).softWrapped && endRow < snapshot.rows - 1) {
+            endRow++
+        }
+
+        // If no wrapping, fall back to single-line detection
+        if (startRow == endRow) {
+            return line.autoDetectedUrls.firstOrNull { col >= it.first && col < it.second }?.third
+        }
+
+        // Join lines and compute the adjusted column offset
+        val joined = StringBuilder()
+        var colOffset = 0
+        for (r in startRow..endRow) {
+            val l = getVisibleLine(r)
+            if (r == row) colOffset = joined.length
+            joined.append(l.text)
+        }
+        val absoluteCol = colOffset + col
+
+        // Find URLs in the joined text
+        return TerminalLine.URL_REGEX.findAll(joined).firstOrNull { match ->
+            absoluteCol >= match.range.first && absoluteCol <= match.range.last
+        }?.value
+    }
+
+    /**
      * Scroll to the bottom (current screen).
      */
     fun scrollToBottom() {
