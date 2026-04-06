@@ -1023,8 +1023,11 @@ fun TerminalWithAccessibility(
                                         .coerceIn(0, screenState.snapshot.cols - 1)
                                     val tapRow = (down.position.y / baseCharHeight).toInt()
                                         .coerceIn(0, screenState.snapshot.rows - 1)
-                                    val line = screenState.getVisibleLine(tapRow)
-                                    val hyperlinkUrl = line.getHyperlinkUrlAt(tapCol)
+                                    // Check hyperlinks first — they take priority over
+                                    // mouse mode callbacks so URLs are always tappable.
+                                    // Uses screen-state method which joins soft-wrapped
+                                    // lines for cross-line URL detection.
+                                    val hyperlinkUrl = screenState.getHyperlinkUrlAt(tapRow, tapCol)
 
                                     if (hyperlinkUrl != null) {
                                         // User tapped on a hyperlink
