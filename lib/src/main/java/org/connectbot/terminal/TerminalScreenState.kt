@@ -113,73 +113,70 @@ internal class TerminalScreenState(
 
     /**
      * Get the hyperlink URL at a visible row/col, handling URLs that span
-     * soft-wrapped lines. Joins consecutive soft-wrapped lines before URL
-     * detection so that long URLs wrapping across lines are matched fully.
+     * multiple lines. Joins a small window of lines around the tap point,
+     * strips whitespace between URL-safe chars (wrap artifacts from CLI tools),
+     * and runs one regex match.
      */
     fun getHyperlinkUrlAt(row: Int, col: Int): String? {
         val line = getVisibleLine(row)
 
-        // OSC 8 segments always take priority (they don't span lines)
+        // OSC 8 segments always take priority
         val osc8 = line.semanticSegments.firstOrNull {
             it.semanticType == SemanticType.HYPERLINK && it.contains(col)
         }?.metadata
         if (osc8 != null) return osc8
 
-        // Build the joined text from consecutive soft-wrapped lines
-        // Walk backward to find the first line in this soft-wrap group
-        var startRow = row
-        while (startRow > 0) {
-            val prev = getVisibleLine(startRow - 1)
-            if (!prev.softWrapped) break
-            startRow--
-        }
-        // Walk forward to find the last line
-        var endRow = row
-        while (getVisibleLine(endRow).softWrapped && endRow < snapshot.rows - 1) {
-            endRow++
+        // Try single-line detection first (fast path, cached per line)
+        val singleHit = line.autoDetectedUrls.firstOrNull { col >= it.first && col < it.second }
+        if (singleHit != null) {
+            // If the match doesn't touch a line edge, it's self-contained
+            val trimmedLen = line.text.trimEnd().length
+            if (singleHit.second < trimmedLen && singleHit.first > 0) return singleHit.third
         }
 
-        // If no wrapping, fall back to single-line detection
-        if (startRow == endRow) {
-            return line.autoDetectedUrls.firstOrNull { col >= it.first && col < it.second }?.third
-        }
+        // Join a window of ±6 lines, strip inter-URL whitespace, single regex pass
+        val window = 6
+        val startRow = (row - window).coerceAtLeast(0)
+        val endRow = (row + window).coerceAtMost(snapshot.rows - 1)
 
-        // Join lines and compute the adjusted column offset.
-        // Build a mapping from cleaned-string indices back to raw indices
-        // so we can strip whitespace at wrap boundaries (CLI tools like
-        // claude-code insert spaces when wrapping long URLs) while still
-        // locating the tap position correctly.
         val raw = StringBuilder()
-        var rawColOffset = 0
+        var tapOffset = 0
         for (r in startRow..endRow) {
-            val l = getVisibleLine(r)
-            if (r == row) rawColOffset = raw.length
-            raw.append(l.text)
+            if (r == row) tapOffset = raw.length
+            raw.append(getVisibleLine(r).text)
         }
-        val rawAbsoluteCol = rawColOffset + col
 
-        // Strip spaces/tabs that appear mid-URL at line-wrap boundaries
+        // Collapse whitespace runs between URL-safe chars (one pass).
+        // Lines are padded to terminal width, so between joined lines
+        // there can be 30+ trailing spaces — strip the entire run.
         val cleaned = StringBuilder(raw.length)
-        val rawToClean = IntArray(raw.length) // maps raw index → cleaned index
-        for (i in raw.indices) {
+        val rawToClean = IntArray(raw.length)
+        var i = 0
+        while (i < raw.length) {
             rawToClean[i] = cleaned.length
             val ch = raw[i]
-            // Keep the character unless it's whitespace surrounded by URL-like content
-            // (query params, percent encoding, path segments)
-            if (ch == ' ' || ch == '\t') {
-                // Skip whitespace that's between URL-safe chars (likely wrap artifacts)
-                val prev = if (i > 0) raw[i - 1] else ' '
-                val next = if (i < raw.length - 1) raw[i + 1] else ' '
-                if (prev.isUrlSafe() && next.isUrlSafe()) continue
+            if ((ch == ' ' || ch == '\t') && i > 0 && raw[i - 1].isUrlSafe()) {
+                // Scan ahead past the whitespace run
+                val wsStart = i
+                while (i < raw.length && (raw[i] == ' ' || raw[i] == '\t')) {
+                    rawToClean[i] = cleaned.length
+                    i++
+                }
+                // If URL-safe char follows, skip the entire run; otherwise keep it
+                if (i < raw.length && raw[i].isUrlSafe()) continue
+                // Not URL context — emit the whitespace
+                for (j in wsStart until i) cleaned.append(raw[j])
+                continue
             }
             cleaned.append(ch)
+            i++
         }
-        val cleanedCol = if (rawAbsoluteCol in rawToClean.indices) rawToClean[rawAbsoluteCol] else rawAbsoluteCol
+        val cleanedCol = if (tapOffset + col in rawToClean.indices)
+            rawToClean[tapOffset + col] else tapOffset + col
 
-        // Find URLs in the cleaned text
-        return TerminalLine.URL_REGEX.findAll(cleaned).firstOrNull { match ->
-            cleanedCol >= match.range.first && cleanedCol <= match.range.last
-        }?.value
+        return TerminalLine.URL_REGEX.findAll(cleaned).firstOrNull { m ->
+            cleanedCol >= m.range.first && cleanedCol <= m.range.last
+        }?.value ?: singleHit?.third
     }
 
     /**
@@ -262,4 +259,4 @@ internal fun rememberTerminalScreenState(
 }
 
 /** True if the character commonly appears in URLs (query params, percent encoding, path). */
-private fun Char.isUrlSafe(): Boolean = isLetterOrDigit() || this in "/:@!$&'()*+,;=-._~%?#[]"
+internal fun Char.isUrlSafe(): Boolean = isLetterOrDigit() || this in "/:@!$&'()*+,;=-._~%?#[]"
