@@ -144,19 +144,41 @@ internal class TerminalScreenState(
             return line.autoDetectedUrls.firstOrNull { col >= it.first && col < it.second }?.third
         }
 
-        // Join lines and compute the adjusted column offset
-        val joined = StringBuilder()
-        var colOffset = 0
+        // Join lines and compute the adjusted column offset.
+        // Build a mapping from cleaned-string indices back to raw indices
+        // so we can strip whitespace at wrap boundaries (CLI tools like
+        // claude-code insert spaces when wrapping long URLs) while still
+        // locating the tap position correctly.
+        val raw = StringBuilder()
+        var rawColOffset = 0
         for (r in startRow..endRow) {
             val l = getVisibleLine(r)
-            if (r == row) colOffset = joined.length
-            joined.append(l.text)
+            if (r == row) rawColOffset = raw.length
+            raw.append(l.text)
         }
-        val absoluteCol = colOffset + col
+        val rawAbsoluteCol = rawColOffset + col
 
-        // Find URLs in the joined text
-        return TerminalLine.URL_REGEX.findAll(joined).firstOrNull { match ->
-            absoluteCol >= match.range.first && absoluteCol <= match.range.last
+        // Strip spaces/tabs that appear mid-URL at line-wrap boundaries
+        val cleaned = StringBuilder(raw.length)
+        val rawToClean = IntArray(raw.length) // maps raw index → cleaned index
+        for (i in raw.indices) {
+            rawToClean[i] = cleaned.length
+            val ch = raw[i]
+            // Keep the character unless it's whitespace surrounded by URL-like content
+            // (query params, percent encoding, path segments)
+            if (ch == ' ' || ch == '\t') {
+                // Skip whitespace that's between URL-safe chars (likely wrap artifacts)
+                val prev = if (i > 0) raw[i - 1] else ' '
+                val next = if (i < raw.length - 1) raw[i + 1] else ' '
+                if (prev.isUrlSafe() && next.isUrlSafe()) continue
+            }
+            cleaned.append(ch)
+        }
+        val cleanedCol = if (rawAbsoluteCol in rawToClean.indices) rawToClean[rawAbsoluteCol] else rawAbsoluteCol
+
+        // Find URLs in the cleaned text
+        return TerminalLine.URL_REGEX.findAll(cleaned).firstOrNull { match ->
+            cleanedCol >= match.range.first && cleanedCol <= match.range.last
         }?.value
     }
 
@@ -238,3 +260,6 @@ internal fun rememberTerminalScreenState(
 
     return state
 }
+
+/** True if the character commonly appears in URLs (query params, percent encoding, path). */
+private fun Char.isUrlSafe(): Boolean = isLetterOrDigit() || this in "/:@!$&'()*+,;=-._~%?#[]"
