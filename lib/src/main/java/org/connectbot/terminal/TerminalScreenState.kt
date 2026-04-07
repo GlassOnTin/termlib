@@ -112,6 +112,71 @@ internal class TerminalScreenState(
     }
 
     /**
+     * Get the hyperlink URL at a visible row/col, handling URLs that span
+     * multiple lines. Joins a small window of lines around the tap point,
+     * strips whitespace between URL-safe chars (wrap artifacts from CLI tools),
+     * and runs one regex match.
+     */
+    fun getHyperlinkUrlAt(row: Int, col: Int): String? {
+        val line = getVisibleLine(row)
+
+        // OSC 8 segments always take priority
+        val osc8 = line.semanticSegments.firstOrNull {
+            it.semanticType == SemanticType.HYPERLINK && it.contains(col)
+        }?.metadata
+        if (osc8 != null) return osc8
+
+        // Try single-line detection first (fast path, cached per line)
+        val singleHit = line.autoDetectedUrls.firstOrNull { col >= it.first && col < it.second }
+        if (singleHit != null) {
+            // If the match doesn't touch a line edge, it's self-contained
+            val trimmedLen = line.text.trimEnd().length
+            if (singleHit.second < trimmedLen && singleHit.first > 0) return singleHit.third
+        }
+
+        // Join a window of ±6 lines, strip inter-URL whitespace, single regex pass
+        val window = 6
+        val startRow = (row - window).coerceAtLeast(0)
+        val endRow = (row + window).coerceAtMost(snapshot.rows - 1)
+
+        val raw = StringBuilder()
+        var tapOffset = 0
+        for (r in startRow..endRow) {
+            if (r == row) tapOffset = raw.length
+            raw.append(getVisibleLine(r).text)
+        }
+
+        // Collapse whitespace runs between URL-safe chars (one pass).
+        // Lines are padded to terminal width, so between joined lines
+        // there can be 30+ trailing spaces — strip the entire run.
+        val cleaned = StringBuilder(raw.length)
+        val rawToClean = IntArray(raw.length)
+        var i = 0
+        while (i < raw.length) {
+            rawToClean[i] = cleaned.length
+            val ch = raw[i]
+            if ((ch == ' ' || ch == '\t') && i > 0 && raw[i - 1].isUrlSafe()) {
+                val wsStart = i
+                while (i < raw.length && (raw[i] == ' ' || raw[i] == '\t')) {
+                    rawToClean[i] = cleaned.length
+                    i++
+                }
+                if (i < raw.length && raw[i].isUrlSafe()) continue
+                for (j in wsStart until i) cleaned.append(raw[j])
+                continue
+            }
+            cleaned.append(ch)
+            i++
+        }
+        val cleanedCol = if (tapOffset + col in rawToClean.indices)
+            rawToClean[tapOffset + col] else tapOffset + col
+
+        return TerminalLine.URL_REGEX.findAll(cleaned).firstOrNull { m ->
+            cleanedCol >= m.range.first && cleanedCol <= m.range.last
+        }?.value ?: singleHit?.third
+    }
+
+    /**
      * Scroll to the bottom (current screen).
      */
     fun scrollToBottom() {
@@ -177,3 +242,6 @@ internal fun rememberTerminalScreenState(
 
     return state
 }
+
+/** True if the character commonly appears in URLs (query params, percent encoding, path). */
+internal fun Char.isUrlSafe(): Boolean = isLetterOrDigit() || this in "/:@!$&'()*+,;=-._~%?#[]"

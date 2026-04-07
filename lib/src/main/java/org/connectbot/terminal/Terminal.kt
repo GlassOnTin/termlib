@@ -1023,8 +1023,9 @@ fun TerminalWithAccessibility(
                                         .coerceIn(0, screenState.snapshot.cols - 1)
                                     val tapRow = (down.position.y / baseCharHeight).toInt()
                                         .coerceIn(0, screenState.snapshot.rows - 1)
-                                    val line = screenState.getVisibleLine(tapRow)
-                                    val hyperlinkUrl = line.getHyperlinkUrlAt(tapCol)
+                                    // Use screen-state method which joins adjacent
+                                    // lines for cross-line URL detection.
+                                    val hyperlinkUrl = screenState.getHyperlinkUrlAt(tapRow, tapCol)
 
                                     if (hyperlinkUrl != null) {
                                         // User tapped on a hyperlink
@@ -1066,11 +1067,28 @@ fun TerminalWithAccessibility(
                 )
 
                 // Draw each line (zoom/pan applied via graphicsLayer)
+                // Precompute which rows are part of a multi-line URL group.
+                // A row is a URL continuation if it and the previous row end/start
+                // with URL-safe chars and the chain traces back to a detected URL.
+                val urlContinuationRows = mutableSetOf<Int>()
+                for (row in 1 until screenState.snapshot.rows) {
+                    val prev = screenState.getVisibleLine(row - 1).text.trimEnd()
+                    val cur = screenState.getVisibleLine(row).text.trimStart()
+                    if (prev.isNotEmpty() && cur.isNotEmpty() &&
+                        prev.last().isUrlSafe() && cur.first().isUrlSafe()) {
+                        if ((row - 1) in urlContinuationRows ||
+                            screenState.getVisibleLine(row - 1).autoDetectedUrls.isNotEmpty()) {
+                            urlContinuationRows.add(row)
+                        }
+                    }
+                }
+
                 for (row in 0 until screenState.snapshot.rows) {
                     val line = screenState.getVisibleLine(row)
                     drawLine(
                         line = line,
                         row = row,
+                        isUrlContinuation = row in urlContinuationRows,
                         charWidth = baseCharWidth,
                         charHeight = baseCharHeight,
                         charBaseline = baseCharBaseline,
@@ -1240,6 +1258,7 @@ fun TerminalWithAccessibility(
 private fun DrawScope.drawLine(
     line: TerminalLine,
     row: Int,
+    isUrlContinuation: Boolean = false,
     charWidth: Float,
     charHeight: Float,
     charBaseline: Float,
@@ -1257,8 +1276,10 @@ private fun DrawScope.drawLine(
         // Check if this cell is selected
         val isSelected = selectionManager.isCellSelected(row, col)
 
-        // Check if this cell is part of a hyperlink
-        val isHyperlink = line.getHyperlinkUrlAt(col) != null
+        // Check if this cell is part of a hyperlink.
+        // For URL continuation rows, underline all non-whitespace content.
+        val isHyperlink = line.getHyperlinkUrlAt(col) != null ||
+            (isUrlContinuation && cell.char != ' ')
 
         // Determine colors (handle reverse video and selection)
         val fgColor = if (cell.reverse) cell.bgColor else cell.fgColor
