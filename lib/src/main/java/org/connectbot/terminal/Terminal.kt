@@ -1236,7 +1236,7 @@ fun TerminalWithAccessibility(
                     if (prev.isNotEmpty() && cur.isNotEmpty() &&
                         prev.last().isUrlSafe() && cur.first().isUrlSafe()) {
                         // Check that the chain traces back to a line with an actual URL
-                        if (row - 1 == 0 || (row - 1) in urlContinuationRows ||
+                        if ((row - 1) in urlContinuationRows ||
                             screenState.getVisibleLine(row - 1).autoDetectedUrls.isNotEmpty()) {
                             urlContinuationRows.add(row)
                         }
