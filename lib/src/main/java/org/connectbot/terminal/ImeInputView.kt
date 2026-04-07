@@ -57,6 +57,16 @@ internal class ImeInputView(
             }
         }
 
+    /** When true, use standard keyboard allowing voice input, swipe, and autocomplete. */
+    var allowStandardKeyboard: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            if (windowToken != null) {
+                inputMethodManager.restartInput(this)
+            }
+        }
+
     /**
      * Show the IME forcefully. This is more reliable than SoftwareKeyboardController.
      */
@@ -97,8 +107,12 @@ internal class ImeInputView(
             outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT
             outAttrs.initialSelStart = 0
             outAttrs.initialSelEnd = 0
+        } else if (allowStandardKeyboard) {
+            // Standard keyboard: voice input, swipe typing, autocomplete enabled.
+            // The IME may learn typed input including passwords.
+            outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT
         } else {
-            // Normal terminal mode:
+            // Secure terminal mode (default):
             // - TYPE_TEXT_VARIATION_PASSWORD: Shows password-style keyboard with number rows
             // - TYPE_TEXT_VARIATION_VISIBLE_PASSWORD: Keeps text visible (we handle display ourselves)
             // - TYPE_TEXT_FLAG_NO_SUGGESTIONS: Disables autocomplete/suggestions

@@ -319,6 +319,7 @@ fun Terminal(
     onComposeControllerAvailable: ((ComposeController) -> Unit)? = null,
     onFontSizeChanged: ((TextUnit) -> Unit)? = null,
     gestureCallback: TerminalGestureCallback? = null,
+    allowStandardKeyboard: Boolean = false,
 ) {
     TerminalWithAccessibility(
         terminalEmulator = terminalEmulator,
@@ -342,6 +343,7 @@ fun Terminal(
         onComposeControllerAvailable = onComposeControllerAvailable,
         onFontSizeChanged = onFontSizeChanged,
         gestureCallback = gestureCallback,
+        allowStandardKeyboard = allowStandardKeyboard,
     )
 }
 
@@ -375,6 +377,7 @@ fun TerminalWithAccessibility(
     onComposeControllerAvailable: ((ComposeController) -> Unit)? = null,
     onFontSizeChanged: ((TextUnit) -> Unit)? = null,
     gestureCallback: TerminalGestureCallback? = null,
+    allowStandardKeyboard: Boolean = false,
 ) {
     if (terminalEmulator !is TerminalEmulatorImpl) {
         Box(
@@ -1402,6 +1405,7 @@ fun TerminalWithAccessibility(
             AndroidView(
                 factory = { context ->
                     ImeInputView(context, keyboardHandler).apply {
+                        this.allowStandardKeyboard = allowStandardKeyboard
                         // Set up key event handling
                         setOnKeyListener { _, _, event ->
                             if (event.action == android.view.KeyEvent.ACTION_DOWN) {
@@ -1414,6 +1418,9 @@ fun TerminalWithAccessibility(
                         // Store reference for IME control
                         imeInputView = this
                     }
+                },
+                update = { view ->
+                    view.allowStandardKeyboard = allowStandardKeyboard
                 },
                 modifier = Modifier
                     .size(1.dp)
