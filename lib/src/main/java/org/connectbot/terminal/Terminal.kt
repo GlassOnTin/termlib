@@ -1227,14 +1227,23 @@ fun TerminalWithAccessibility(
                 )
 
                 // Precompute which rows are part of a multi-line URL group.
-                // A row is a URL continuation if the previous row ends with
-                // URL-safe chars and this row starts with URL-safe chars.
+                // A row is a URL continuation iff the previous row ends with a
+                // URL-safe character (after trimming terminal-width padding)
+                // AND this row begins with a URL-safe character **at column 0**
+                // — i.e. no leading whitespace. The "no leading whitespace"
+                // rule distinguishes a wrapped URL ("…/issu" + "es/78") from
+                // a URL followed by a new indented line of prose. Matches the
+                // same rule used for tap-to-open in
+                // [TerminalScreenState.getHyperlinkUrlAt]; without it, the
+                // visual underline would extend onto unrelated text.
                 val urlContinuationRows = mutableSetOf<Int>()
                 for (row in 1 until screenState.snapshot.rows) {
                     val prev = screenState.getVisibleLine(row - 1).text.trimEnd()
-                    val cur = screenState.getVisibleLine(row).text.trimStart()
-                    if (prev.isNotEmpty() && cur.isNotEmpty() &&
-                        prev.last().isUrlSafe() && cur.first().isUrlSafe()) {
+                    val curText = screenState.getVisibleLine(row).text
+                    if (prev.isNotEmpty() && curText.isNotEmpty() &&
+                        prev.last().isUrlSafe() &&
+                        curText[0] != ' ' && curText[0] != '\t' &&
+                        curText[0].isUrlSafe()) {
                         // Check that the chain traces back to a line with an actual URL
                         if ((row - 1) in urlContinuationRows ||
                             screenState.getVisibleLine(row - 1).autoDetectedUrls.isNotEmpty()) {

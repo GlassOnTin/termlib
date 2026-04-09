@@ -112,10 +112,23 @@ internal class TerminalScreenState(
     }
 
     /**
-     * Get the hyperlink URL at a visible row/col, handling URLs that span
-     * multiple lines. Joins a small window of lines around the tap point,
-     * strips whitespace between URL-safe chars (wrap artifacts from CLI tools),
-     * and runs one regex match.
+     * Get the hyperlink URL at a visible row/col, handling URLs that wrap
+     * across terminal-width boundaries.
+     *
+     * A multi-line URL is reconstructed by walking outward from [row] only
+     * through rows that are *genuine* URL continuations of their neighbour:
+     * the previous row ends with a URL-safe character (after stripping the
+     * terminal-width padding) AND the next row begins with a URL-safe
+     * character **at column 0** — no leading whitespace allowed. That last
+     * constraint is what distinguishes a wrapped URL ("…/issu" + "es/78")
+     * from a URL followed by a new line of indented prose ("…/issues/78"
+     * + "  i think…"): a real wrap has no room for leading indentation.
+     *
+     * Within a single row, whitespace is always preserved, so prose after
+     * a URL on the same row is not merged into the URL by the regex.
+     *
+     * Fixes the "ithinktheis..." whitespace-gobbling regression reported
+     * during #78 review.
      */
     fun getHyperlinkUrlAt(row: Int, col: Int): String? {
         val line = getVisibleLine(row)
@@ -126,57 +139,59 @@ internal class TerminalScreenState(
         }?.metadata
         if (osc8 != null) return osc8
 
-        // Try single-line detection first (fast path, cached per line)
+        // Single-line fast path: if a regex match doesn't touch either edge
+        // of the trimmed line text, no continuation logic is needed.
         val singleHit = line.autoDetectedUrls.firstOrNull { col >= it.first && col < it.second }
         if (singleHit != null) {
-            // If the match doesn't touch a line edge, it's self-contained
             val trimmedLen = line.text.trimEnd().length
             if (singleHit.second < trimmedLen && singleHit.first > 0) return singleHit.third
         }
 
-        // Join a window of ±6 lines, strip inter-URL whitespace, single regex pass
-        val window = 6
-        val startRow = (row - window).coerceAtLeast(0)
-        val endRow = (row + window).coerceAtMost(snapshot.rows - 1)
+        // Walk outward from `row` to find the tight bounds of the URL
+        // continuation group. A row `r+1` is a continuation of row `r` iff:
+        //   - row r's trimEnd last char is URL-safe AND
+        //   - row r+1's FIRST char (at col 0, no trimStart) is URL-safe.
+        // The "no trimStart" rule is what blocks indented prose from being
+        // glued onto a URL ending on the previous row.
+        fun isContinuation(prevRow: Int, curRow: Int): Boolean {
+            if (prevRow < 0 || curRow >= snapshot.rows) return false
+            val prevText = getVisibleLine(prevRow).text
+            val prevTrimmed = prevText.trimEnd()
+            if (prevTrimmed.isEmpty() || !prevTrimmed.last().isUrlSafe()) return false
+            val curText = getVisibleLine(curRow).text
+            if (curText.isEmpty()) return false
+            val firstCh = curText[0]
+            // firstCh == ' ' or '\t' would fail isUrlSafe() too, but be
+            // explicit — leading whitespace on the continuation row is the
+            // key disambiguator and any indentation kills the continuation.
+            if (firstCh == ' ' || firstCh == '\t') return false
+            return firstCh.isUrlSafe()
+        }
 
-        val raw = StringBuilder()
-        var tapOffset = 0
+        var startRow = row
+        while (startRow > 0 && isContinuation(startRow - 1, startRow)) startRow--
+        var endRow = row
+        while (endRow < snapshot.rows - 1 && isContinuation(endRow, endRow + 1)) endRow++
+
+        // Build the joined text. Within each row, we trim only the trailing
+        // terminal-width padding — the internal whitespace of the row is
+        // preserved so prose word separators remain intact. Rows in the
+        // continuation group are concatenated with no separator (that IS
+        // the wrap behaviour we want to reverse).
+        val joined = StringBuilder()
+        var tapOffsetInJoined = 0
         for (r in startRow..endRow) {
-            if (r == row) tapOffset = raw.length
-            raw.append(getVisibleLine(r).text)
+            if (r == row) tapOffsetInJoined = joined.length + col
+            val rowText = getVisibleLine(r).text.trimEnd()
+            joined.append(rowText)
         }
 
-        // Collapse whitespace runs between URL-safe chars (one pass).
-        // Lines are padded to terminal width, so between joined lines
-        // there can be 30+ trailing spaces — strip the entire run.
-        val cleaned = StringBuilder(raw.length)
-        val rawToClean = IntArray(raw.length)
-        var i = 0
-        while (i < raw.length) {
-            rawToClean[i] = cleaned.length
-            val ch = raw[i]
-            if ((ch == ' ' || ch == '\t') && i > 0 && raw[i - 1].isUrlSafe()) {
-                // Scan ahead past the whitespace run
-                val wsStart = i
-                while (i < raw.length && (raw[i] == ' ' || raw[i] == '\t')) {
-                    rawToClean[i] = cleaned.length
-                    i++
-                }
-                // If URL-safe char follows, skip the entire run; otherwise keep it
-                if (i < raw.length && raw[i].isUrlSafe()) continue
-                // Not URL context — emit the whitespace
-                for (j in wsStart until i) cleaned.append(raw[j])
-                continue
-            }
-            cleaned.append(ch)
-            i++
+        // If the URL contains the tap point in the joined text, return it.
+        // Otherwise fall back to the single-line hit (if any).
+        val match = TerminalLine.URL_REGEX.findAll(joined).firstOrNull { m ->
+            tapOffsetInJoined in m.range.first..m.range.last
         }
-        val cleanedCol = if (tapOffset + col in rawToClean.indices)
-            rawToClean[tapOffset + col] else tapOffset + col
-
-        return TerminalLine.URL_REGEX.findAll(cleaned).firstOrNull { m ->
-            cleanedCol >= m.range.first && cleanedCol <= m.range.last
-        }?.value ?: singleHit?.third
+        return match?.value ?: singleHit?.third
     }
 
     /**
