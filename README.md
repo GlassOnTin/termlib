@@ -1,6 +1,6 @@
 # ConnectBot Terminal
 
-This is the future ConnectBot Terminal Compose component that displays a
+This is the ConnectBot Terminal, a Jetpack Compose component that displays a
 terminal emulator. It uses libvterm via JNI to provide accurate terminal
 emulation.
 
