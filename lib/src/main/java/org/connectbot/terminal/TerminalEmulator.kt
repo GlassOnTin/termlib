@@ -447,8 +447,11 @@ internal class TerminalEmulatorImpl(
         // Save source rect — pushScrollbackLine uses it to limit segment shifting
         // to lines within the scroll region (avoiding corruption of tmux status bars etc.)
         lastMoveRectSrc = src
-        // Treat moverect as damage on the destination
-        return damage(dest.startRow, dest.endRow, dest.startCol, dest.endCol)
+        // Mark destination as damaged so processPendingUpdates re-fetches those rows.
+        // Return 1 to tell libvterm we handled the scroll — avoids the fallback path
+        // in moverect_user() that would redundantly add dest to screen->damaged again.
+        damage(dest.startRow, dest.endRow, dest.startCol, dest.endCol)
+        return 1
     }
 
     override fun moveCursor(pos: CursorPosition, oldPos: CursorPosition, visible: Boolean): Int {

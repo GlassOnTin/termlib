@@ -784,11 +784,25 @@ fun TerminalWithAccessibility(
         val newRows =
             forcedSize?.first ?: charsPerDimension(availableHeight, baseCharHeight)
 
-        // Auto-scroll to bottom when new content arrives (if not manually scrolled)
-        val wasAtBottom = screenState.scrollbackPosition == 0
+        // Auto-scroll to bottom when new content arrives (if not manually scrolled).
+        //
+        // Two cases where we need to snap back to the bottom:
+        // 1. scrollbackPosition drifted to a small non-zero value due to a brief
+        //    accidental touch (gesture set it to 1–2 lines, then updateSnapshot
+        //    adjusted it upward as scrollback grew). Without this, the terminal
+        //    stays stuck showing stale scrollback content mixed with the current
+        //    screen — visible as green blocks and garbled text during animations.
+        // 2. scrollbackPosition became non-zero due to updateSnapshot adjusting
+        //    it after a resize that changed scrollback size.
+        //
+        // We auto-scroll only when the user is NOT actively scrolling (scrollOffset
+        // animation not running) and the position is "close" to the bottom — a
+        // small drift from 0 that the user didn't intentionally create by a long
+        // sustained scroll gesture.
         LaunchedEffect(screenState.snapshot.lines.size, screenState.snapshot.scrollback.size) {
-            // Only auto-scroll if user was already at bottom
-            if (wasAtBottom && screenState.scrollbackPosition != 0) {
+            val pos = screenState.scrollbackPosition
+            if (pos in 1..3 && !scrollOffset.isRunning) {
+                // Small drift — snap back to bottom
                 screenState.scrollToBottom()
                 scrollOffset.snapTo(0f)
             }
@@ -1147,10 +1161,16 @@ fun TerminalWithAccessibility(
                                             screenState.scrollBy(scrolledLines - screenState.scrollbackPosition)
                                         }
 
-                                        // Snap to final clamped position
+                                        // Snap to final clamped position.
+                                        // If we settled within 2 lines of the bottom, snap
+                                        // fully to 0 — prevents accidental micro-flicks from
+                                        // leaving the terminal stuck 1–2 lines scrolled up,
+                                        // which causes garbled display during animations.
+                                        val threshold = 2f * baseCharHeight
                                         scrollOffset.snapTo(targetValue.coerceIn(0f, maxScroll))
-                                        if (targetValue <= 0f) {
+                                        if (targetValue <= threshold) {
                                             screenState.scrollToBottom()
+                                            scrollOffset.snapTo(0f)
                                         }
                                     }
                                 }
