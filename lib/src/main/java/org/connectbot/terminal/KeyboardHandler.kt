@@ -47,7 +47,8 @@ internal class KeyboardHandler(
     private val terminalEmulator: TerminalEmulator,
     var modifierManager: ModifierManager? = null,
     var selectionController: SelectionController? = null,
-    var onInputProcessed: (() -> Unit)? = null
+    var onInputProcessed: (() -> Unit)? = null,
+    var onPasteShortcut: (() -> Unit)? = null,
 ) {
     var composeMode: ComposeMode? = null
 
@@ -64,6 +65,16 @@ internal class KeyboardHandler(
         val ctrl = event.isCtrlPressed
         val alt = event.isAltPressed
         val shift = event.isShiftPressed
+
+        // Hardware Ctrl+Shift+V → paste from Android clipboard.
+        // Only consumed if a host wired up the callback (i.e. the
+        // user preference is on); otherwise falls through and is
+        // forwarded as a normal key combo.
+        val pasteShortcut = onPasteShortcut
+        if (pasteShortcut != null && ctrl && shift && !alt && key == Key.V) {
+            pasteShortcut()
+            return true
+        }
 
         // If compose mode is active, intercept all input
         val compose = composeMode

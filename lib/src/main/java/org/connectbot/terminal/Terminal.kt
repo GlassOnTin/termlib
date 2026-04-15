@@ -47,6 +47,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -320,6 +321,7 @@ fun Terminal(
     onFontSizeChanged: ((TextUnit) -> Unit)? = null,
     gestureCallback: TerminalGestureCallback? = null,
     allowStandardKeyboard: Boolean = false,
+    onPasteShortcut: (() -> Unit)? = null,
 ) {
     TerminalWithAccessibility(
         terminalEmulator = terminalEmulator,
@@ -344,6 +346,7 @@ fun Terminal(
         onFontSizeChanged = onFontSizeChanged,
         gestureCallback = gestureCallback,
         allowStandardKeyboard = allowStandardKeyboard,
+        onPasteShortcut = onPasteShortcut,
     )
 }
 
@@ -378,6 +381,7 @@ fun TerminalWithAccessibility(
     onFontSizeChanged: ((TextUnit) -> Unit)? = null,
     gestureCallback: TerminalGestureCallback? = null,
     allowStandardKeyboard: Boolean = false,
+    onPasteShortcut: (() -> Unit)? = null,
 ) {
     if (terminalEmulator !is TerminalEmulatorImpl) {
         Box(
@@ -404,6 +408,13 @@ fun TerminalWithAccessibility(
     // Keyboard handler (will be updated with selectionController after it's created)
     val keyboardHandler = remember(terminalEmulator) {
         KeyboardHandler(terminalEmulator, modifierManager)
+    }
+
+    // Re-bind the paste shortcut callback whenever the host swaps it
+    // (e.g. when the user toggles the preference). Reading null here
+    // releases the binding so V keys flow through unchanged.
+    SideEffect {
+        keyboardHandler.onPasteShortcut = onPasteShortcut
     }
 
     // Font size state (pinch-to-zoom adjusts this directly)

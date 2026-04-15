@@ -170,16 +170,15 @@ class KeyboardHandlerTest {
         assertEquals(3, inputProcessedCallCount)
     }
 
-    private fun createKeyEvent(key: Key, type: KeyEventType): KeyEvent {
+    private fun createKeyEvent(key: Key, type: KeyEventType, metaState: Int = 0): KeyEvent {
+        val action = if (type == KeyEventType.KeyDown) {
+            android.view.KeyEvent.ACTION_DOWN
+        } else {
+            android.view.KeyEvent.ACTION_UP
+        }
         return KeyEvent(
             androidx.compose.ui.input.key.NativeKeyEvent(
-                android.view.KeyEvent(
-                    if (type == KeyEventType.KeyDown)
-                        android.view.KeyEvent.ACTION_DOWN
-                    else
-                        android.view.KeyEvent.ACTION_UP,
-                    keyToAndroidKeyCode(key)
-                )
+                0L, 0L, action, keyToAndroidKeyCode(key), 0, metaState,
             )
         )
     }
@@ -319,6 +318,7 @@ class KeyboardHandlerTest {
             Key.A -> android.view.KeyEvent.KEYCODE_A
             Key.B -> android.view.KeyEvent.KEYCODE_B
             Key.C -> android.view.KeyEvent.KEYCODE_C
+            Key.V -> android.view.KeyEvent.KEYCODE_V
             Key.Enter -> android.view.KeyEvent.KEYCODE_ENTER
             Key.Spacebar -> android.view.KeyEvent.KEYCODE_SPACE
             Key.Backspace -> android.view.KeyEvent.KEYCODE_DEL
@@ -326,5 +326,76 @@ class KeyboardHandlerTest {
             Key.Escape -> android.view.KeyEvent.KEYCODE_ESCAPE
             else -> android.view.KeyEvent.KEYCODE_UNKNOWN
         }
+    }
+
+    // === Paste shortcut (Ctrl+Shift+V) ===
+
+    @Test
+    fun testCtrlShiftVInvokesPasteShortcutWhenWired() {
+        var pasteCalled = 0
+        keyboardHandler.onPasteShortcut = { pasteCalled++ }
+        keyboardHandler.onInputProcessed = { inputProcessedCallCount++ }
+
+        val meta = android.view.KeyEvent.META_CTRL_ON or
+            android.view.KeyEvent.META_CTRL_LEFT_ON or
+            android.view.KeyEvent.META_SHIFT_ON or
+            android.view.KeyEvent.META_SHIFT_LEFT_ON
+        val handled = keyboardHandler.onKeyEvent(
+            createKeyEvent(Key.V, KeyEventType.KeyDown, meta)
+        )
+
+        assertTrue(handled)
+        assertEquals(1, pasteCalled)
+        // Shortcut consumed the event before the normal dispatch path,
+        // so onInputProcessed must not fire for this key.
+        assertEquals(0, inputProcessedCallCount)
+    }
+
+    @Test
+    fun testCtrlShiftVFallsThroughWhenCallbackNull() {
+        var pasteCalled = 0
+        keyboardHandler.onPasteShortcut = null
+        keyboardHandler.onInputProcessed = { inputProcessedCallCount++ }
+
+        val meta = android.view.KeyEvent.META_CTRL_ON or
+            android.view.KeyEvent.META_CTRL_LEFT_ON or
+            android.view.KeyEvent.META_SHIFT_ON or
+            android.view.KeyEvent.META_SHIFT_LEFT_ON
+        val handled = keyboardHandler.onKeyEvent(
+            createKeyEvent(Key.V, KeyEventType.KeyDown, meta)
+        )
+
+        // The V key still gets handled (dispatched to the terminal),
+        // just not as a paste shortcut.
+        assertTrue(handled)
+        assertEquals(0, pasteCalled)
+        assertEquals(1, inputProcessedCallCount)
+    }
+
+    @Test
+    fun testPlainVDoesNotInvokePasteShortcut() {
+        var pasteCalled = 0
+        keyboardHandler.onPasteShortcut = { pasteCalled++ }
+        keyboardHandler.onInputProcessed = { inputProcessedCallCount++ }
+
+        keyboardHandler.onKeyEvent(createKeyEvent(Key.V, KeyEventType.KeyDown, 0))
+
+        assertEquals(0, pasteCalled)
+        assertEquals(1, inputProcessedCallCount)
+    }
+
+    @Test
+    fun testCtrlVAloneDoesNotInvokePasteShortcut() {
+        var pasteCalled = 0
+        keyboardHandler.onPasteShortcut = { pasteCalled++ }
+        keyboardHandler.onInputProcessed = { inputProcessedCallCount++ }
+
+        val meta = android.view.KeyEvent.META_CTRL_ON or
+            android.view.KeyEvent.META_CTRL_LEFT_ON
+        keyboardHandler.onKeyEvent(createKeyEvent(Key.V, KeyEventType.KeyDown, meta))
+
+        assertEquals(0, pasteCalled)
+        // Ctrl+V is the literal SUB control char for the terminal, still handled.
+        assertEquals(1, inputProcessedCallCount)
     }
 }
