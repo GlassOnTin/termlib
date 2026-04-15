@@ -148,24 +148,49 @@ internal class TerminalScreenState(
         }
 
         // Walk outward from `row` to find the tight bounds of the URL
-        // continuation group. A row `r+1` is a continuation of row `r` iff:
-        //   - row r's trimEnd last char is URL-safe AND
-        //   - row r+1's FIRST char (at col 0, no trimStart) is URL-safe.
-        // The "no trimStart" rule is what blocks indented prose from being
-        // glued onto a URL ending on the previous row.
+        // continuation group. A row `r+1` is a continuation of row `r` iff
+        // row `r` was near-completely filled (no room for more content on
+        // the same row) and either:
+        //   - row r+1's first char at col 0 is URL-safe, OR
+        //   - row r+1 is indented with whitespace followed by a URL-safe
+        //     char AND row r was filled exactly to the right margin.
+        //
+        // The "near-completely filled" test is what distinguishes a wrapped
+        // URL from a URL on a short row followed by an unrelated line of
+        // prose. If row r had visible slack, the CLI would have continued
+        // the URL on the same row rather than breaking it.
+        //
+        // The indented-with-leading-whitespace case handles markdown bullet
+        // wraps where the CLI renderer inserts an indent on the continuation
+        // line to align with the bullet text: only permitted when row r has
+        // zero slack, since an indented new paragraph after unused trailing
+        // cells is definitely a fresh logical line, not a URL continuation.
         fun isContinuation(prevRow: Int, curRow: Int): Boolean {
             if (prevRow < 0 || curRow >= snapshot.rows) return false
-            val prevText = getVisibleLine(prevRow).text
+            val prevLine = getVisibleLine(prevRow)
+            val prevText = prevLine.text
             val prevTrimmed = prevText.trimEnd()
             if (prevTrimmed.isEmpty() || !prevTrimmed.last().isUrlSafe()) return false
+
+            // Slack = unused cells at the right margin of the previous row.
+            // A genuine forced wrap leaves ~0 slack; the CLI-wrap-at-column-
+            // boundary case leaves 0-2 depending on exact alignment.
+            val slack = prevText.length - prevTrimmed.length
+            val terminalWrapped = prevLine.softWrapped
+            if (slack > CONTINUATION_SLACK_TOLERANCE && !terminalWrapped) return false
+
             val curText = getVisibleLine(curRow).text
             if (curText.isEmpty()) return false
             val firstCh = curText[0]
-            // firstCh == ' ' or '\t' would fail isUrlSafe() too, but be
-            // explicit — leading whitespace on the continuation row is the
-            // key disambiguator and any indentation kills the continuation.
-            if (firstCh == ' ' || firstCh == '\t') return false
-            return firstCh.isUrlSafe()
+            if (firstCh.isUrlSafe()) return true
+            // Indented continuation allowed only when prev row was filled
+            // exactly to the right margin — anything less and the indent
+            // almost certainly marks a new logical paragraph.
+            if (slack == 0 || terminalWrapped) {
+                val firstNonWs = curText.firstOrNull { !it.isWhitespace() } ?: return false
+                return firstNonWs.isUrlSafe()
+            }
+            return false
         }
 
         var startRow = row
@@ -177,13 +202,21 @@ internal class TerminalScreenState(
         // terminal-width padding — the internal whitespace of the row is
         // preserved so prose word separators remain intact. Rows in the
         // continuation group are concatenated with no separator (that IS
-        // the wrap behaviour we want to reverse).
+        // the wrap behaviour we want to reverse). Continuation rows (every
+        // row after startRow) additionally have their leading whitespace
+        // stripped to handle markdown-style bullet-indented wraps, where a
+        // CLI renderer breaks a URL and indents the continuation line.
         val joined = StringBuilder()
         var tapOffsetInJoined = 0
         for (r in startRow..endRow) {
-            if (r == row) tapOffsetInJoined = joined.length + col
             val rowText = getVisibleLine(r).text.trimEnd()
-            joined.append(rowText)
+            val appendText = if (r > startRow) rowText.trimStart() else rowText
+            val strippedLeading = if (r > startRow) rowText.length - appendText.length else 0
+            if (r == row) {
+                val adjustedCol = (col - strippedLeading).coerceAtLeast(0)
+                tapOffsetInJoined = joined.length + adjustedCol
+            }
+            joined.append(appendText)
         }
 
         // If the URL contains the tap point in the joined text, return it.
@@ -242,6 +275,17 @@ internal class TerminalScreenState(
             val delta = newScrollbackSize - oldScrollbackSize
             scrollbackPosition = (scrollbackPosition + delta).coerceIn(0, newScrollbackSize)
         }
+    }
+
+    companion object {
+        // Cells of slack at the right margin of a row that still count as
+        // a "full row" for the purpose of deciding whether the next row is
+        // a URL-wrap continuation. A CLI that hard-wraps at its advertised
+        // column may leave up to a couple of unused cells depending on
+        // exact alignment, so 2 is a compromise between picking up real
+        // wraps and not false-positively gluing an unrelated short line
+        // onto the end of a URL.
+        internal const val CONTINUATION_SLACK_TOLERANCE = 2
     }
 }
 

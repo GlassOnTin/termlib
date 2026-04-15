@@ -190,4 +190,60 @@ class TerminalScreenStateUrlTest {
         // Only row 0's content — regex gives whatever it can match there.
         assertEquals("https://example.com/something/that/is/lo", url)
     }
+
+    // --- REGRESSION: bug reported when Claude Code output wrapped a URL
+    //     at the Haven terminal width.  The URL started mid-row after a
+    //     prose prefix and wrapped to the next row with NO leading
+    //     whitespace on the continuation row — a plain forced wrap.  The
+    //     old single-line fast path returned the row 0 partial because
+    //     the URL match did not touch either "edge" of the trimmed line
+    //     (there were a few unused trailing cells where the wrap
+    //     happened), which was interpreted as "URL is truly interior,
+    //     no need to walk neighbours".  In reality, "followed only by
+    //     whitespace padding" is not the same as "followed by prose" —
+    //     the row *might* be part of a wrap.  Skip the fast path in that
+    //     ambiguous case so the continuation walker gets a chance to
+    //     look at the next row.
+
+    @Test
+    fun `url wrapped after trailing unused cells joins to next row`() {
+        // 80-col terminal, matches a realistic Haven-on-phone width.
+        // Prefix "…Issue #92 reply posted — " pushes the URL to col 27.
+        // The URL is 72 chars.  27+72 = 99, so the URL cannot fit on
+        // row 0 — it has to wrap.  The CLI tool that produced the
+        // output hard-wrapped at the 80-col boundary leaving a few
+        // trailing blanks on row 0 before the continuation.
+        val prefix = "- Issue #92 reply posted — "
+        val url = "https://github.com/GlassOnTin/Haven/issues/92#issuecomment-4253770624"
+        // cols=80 → row 0 fits prefix + first 53 chars of URL
+        //         → row 1 starts at col 0 with the remaining 19 chars
+        val row0 = prefix + url.substring(0, 80 - prefix.length) // 80 chars exactly
+        val row1 = url.substring(80 - prefix.length)             // tail of URL
+        val state = screenState(80, row0, row1)
+
+        // Tap anywhere inside the URL on row 0.
+        val clickCol = prefix.length + 10 // inside "github.com/Glass…"
+        assertEquals(url, state.getHyperlinkUrlAt(row = 0, col = clickCol))
+        // Tapping the continuation row resolves to the full URL too.
+        assertEquals(url, state.getHyperlinkUrlAt(row = 1, col = 4))
+    }
+
+    @Test
+    fun `url interrupted by trailing blanks only, not by prose, is not truncated`() {
+        // Degenerate: 80-col terminal, URL ends before row edge, nothing
+        // after it on the row, and no continuation on the next row.
+        // The walker should return the complete URL on row 0, not a
+        // truncated prefix.  This used to go through the fast path and
+        // return the URL correctly — the risk of the fix is we break
+        // this case, so cover it explicitly.
+        val state = screenState(
+            80,
+            "prefix https://example.com/path", // ends at col 31, blanks after
+            "next line of unrelated prose",
+        )
+        assertEquals(
+            "https://example.com/path",
+            state.getHyperlinkUrlAt(row = 0, col = 12),
+        )
+    }
 }
