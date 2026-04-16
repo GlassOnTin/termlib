@@ -112,14 +112,12 @@ internal class ImeInputView(
             // The IME may learn typed input including passwords.
             outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT
         } else {
-            // Secure terminal mode (default):
-            // - TYPE_TEXT_VARIATION_PASSWORD: Shows password-style keyboard with number rows
-            // - TYPE_TEXT_VARIATION_VISIBLE_PASSWORD: Keeps text visible (we handle display ourselves)
-            // - TYPE_TEXT_FLAG_NO_SUGGESTIONS: Disables autocomplete/suggestions
-            // - TYPE_NULL: No special input processing
-            outAttrs.inputType = EditorInfo.TYPE_NULL or
-                    EditorInfo.TYPE_TEXT_VARIATION_PASSWORD or
-                    EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
+            // Terminal mode (default):
+            // TYPE_CLASS_TEXT enables IME composition (required for CJK input
+            // methods — Japanese, Chinese, Korean). TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            // suppresses autocomplete/prediction while keeping the composition
+            // protocol active. See #96.
+            outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT or
                     EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         }
 
