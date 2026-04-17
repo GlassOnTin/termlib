@@ -321,6 +321,7 @@ fun Terminal(
     onFontSizeChanged: ((TextUnit) -> Unit)? = null,
     gestureCallback: TerminalGestureCallback? = null,
     allowStandardKeyboard: Boolean = false,
+    rawKeyboardMode: Boolean = false,
     onPasteShortcut: (() -> Unit)? = null,
 ) {
     TerminalWithAccessibility(
@@ -346,6 +347,7 @@ fun Terminal(
         onFontSizeChanged = onFontSizeChanged,
         gestureCallback = gestureCallback,
         allowStandardKeyboard = allowStandardKeyboard,
+        rawKeyboardMode = rawKeyboardMode,
         onPasteShortcut = onPasteShortcut,
     )
 }
@@ -381,6 +383,7 @@ fun TerminalWithAccessibility(
     onFontSizeChanged: ((TextUnit) -> Unit)? = null,
     gestureCallback: TerminalGestureCallback? = null,
     allowStandardKeyboard: Boolean = false,
+    rawKeyboardMode: Boolean = false,
     onPasteShortcut: (() -> Unit)? = null,
 ) {
     if (terminalEmulator !is TerminalEmulatorImpl) {
@@ -1459,6 +1462,7 @@ fun TerminalWithAccessibility(
                 factory = { context ->
                     ImeInputView(context, keyboardHandler).apply {
                         this.allowStandardKeyboard = allowStandardKeyboard
+                        this.rawKeyboardMode = rawKeyboardMode
                         // Set up key event handling
                         setOnKeyListener { _, _, event ->
                             if (event.action == android.view.KeyEvent.ACTION_DOWN) {
@@ -1474,6 +1478,7 @@ fun TerminalWithAccessibility(
                 },
                 update = { view ->
                     view.allowStandardKeyboard = allowStandardKeyboard
+                    view.rawKeyboardMode = rawKeyboardMode
                 },
                 modifier = Modifier
                     .size(1.dp)

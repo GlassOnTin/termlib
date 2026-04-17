@@ -70,6 +70,25 @@ internal class ImeInputView(
         }
 
     /**
+     * Raw mode — returns a null [InputConnection] and reports this view as
+     * not-a-text-editor, so the IME has nothing to attach to. Gboard's mic,
+     * suggestion strip, and AI Core writing assist all disappear because
+     * there is no text field for them to decorate. Physical keyboards still
+     * work (dispatchKeyEvent goes through View). Trade-offs: IME composition
+     * is impossible (no CJK) and soft-keyboard input comes through as raw
+     * key events only.
+     */
+    var rawKeyboardMode: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            if (windowToken != null) {
+                flushCompositionBeforeRestart()
+                inputMethodManager.restartInput(this)
+            }
+        }
+
+    /**
      * `restartInput()` discards the live [TerminalInputConnection]. If the
      * user is mid-composition when a mode flag changes (e.g. they toggle
      * Standard keyboard while a Japanese romaji string is partially typed),
@@ -110,11 +129,25 @@ internal class ImeInputView(
         activeConnection?.cancelPending()
     }
 
-    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
-        // Configure IME options
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
+        // Raw mode: no InputConnection at all. Gboard has nothing to attach
+        // to, so its mic / suggestion strip / AI Core writing assist all go
+        // away. Physical key events still flow through View.dispatchKeyEvent.
+        if (rawKeyboardMode) {
+            activeConnection = null
+            return null
+        }
+
+        // Configure IME options. NO_PERSONALIZED_LEARNING tells on-device
+        // IME features (Gboard's word bank, Gemini Nano / AI Core writing
+        // assist) to keep their hands off this field. TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        // alone is no longer sufficient on recent Gboard builds — the mic
+        // and AI features live in the toolbar, separate from the suggestion
+        // strip, and only the learning-opt-out signal keeps them away.
         outAttrs.imeOptions = outAttrs.imeOptions or
                 EditorInfo.IME_FLAG_NO_EXTRACT_UI or
                 EditorInfo.IME_FLAG_NO_ENTER_ACTION or
+                EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING or
                 EditorInfo.IME_ACTION_NONE
 
         if (isComposeModeActive) {
@@ -143,7 +176,7 @@ internal class ImeInputView(
         return TerminalInputConnection(this, isComposeModeActive).also { activeConnection = it }
     }
 
-    override fun onCheckIsTextEditor(): Boolean = true
+    override fun onCheckIsTextEditor(): Boolean = !rawKeyboardMode
 
     private var activeConnection: TerminalInputConnection? = null
 
