@@ -53,6 +53,7 @@ internal class ImeInputView(
             if (field == value) return
             field = value
             if (windowToken != null) {
+                flushCompositionBeforeRestart()
                 inputMethodManager.restartInput(this)
             }
         }
@@ -63,9 +64,24 @@ internal class ImeInputView(
             if (field == value) return
             field = value
             if (windowToken != null) {
+                flushCompositionBeforeRestart()
                 inputMethodManager.restartInput(this)
             }
         }
+
+    /**
+     * `restartInput()` discards the live [TerminalInputConnection]. If the
+     * user is mid-composition when a mode flag changes (e.g. they toggle
+     * Standard keyboard while a Japanese romaji string is partially typed),
+     * the projected characters are already in the terminal but the state
+     * that knows about them — [TerminalInputConnection.composingText] — is
+     * about to be thrown away. Erase the projected text first so the
+     * terminal matches the "empty composition" state the new connection
+     * will start from.
+     */
+    private fun flushCompositionBeforeRestart() {
+        activeConnection?.flushCompositionAsBackspaces()
+    }
 
     /**
      * Show the IME forcefully. This is more reliable than SoftwareKeyboardController.
@@ -89,6 +105,9 @@ internal class ImeInputView(
         // Always hide IME when view is detached to prevent SHOW_FORCED from keeping keyboard
         // open after the app/activity is destroyed
         hideIme()
+        // Cancel any deferred Enter-fallback so a Handler callback doesn't fire
+        // into a detached view after the IME committed "\n" just before teardown.
+        activeConnection?.cancelPending()
     }
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
@@ -136,7 +155,12 @@ internal class ImeInputView(
      * suggestion context stays in sync with the terminal's stateless text model.
      */
     fun resetImeBuffer() {
+        // Clear both the Editable AND the composing-text tracking so an
+        // in-flight IME composition doesn't resume against stale state
+        // (which would make the next setComposingText() produce ghost
+        // backspaces or duplicated input).
         activeConnection?.editable?.clear()
+        activeConnection?.resetComposition()
         inputMethodManager.updateSelection(this, 0, 0, -1, -1)
     }
 
@@ -206,14 +230,16 @@ internal class ImeInputView(
                 return sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
             }
 
-            // Delete multiple characters (leftLength backspaces)
-            for (i in 0 until leftLength) {
+            // Cap the loop: real IMEs send single-digit values here. A misbehaving
+            // or hostile IME asking for ~2^31 deletions would freeze the UI thread.
+            val bounded = leftLength.coerceIn(0, MAX_DELETE_SURROUNDING)
+            for (i in 0 until bounded) {
                 sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
             }
 
             // TODO: Implement forward delete if rightLength > 0
-            if (leftLength > 0 && composingText.isNotEmpty()) {
-                val newLength = (composingText.length - leftLength).coerceAtLeast(0)
+            if (bounded > 0 && composingText.isNotEmpty()) {
+                val newLength = (composingText.length - bounded).coerceAtLeast(0)
                 composingText = composingText.substring(0, newLength)
             }
 
@@ -304,5 +330,42 @@ internal class ImeInputView(
                 keyboardHandler.onTextInput(text.toByteArray(Charsets.UTF_8))
             }
         }
+
+        /**
+         * Cancel any pending deferred dispatches. Called from
+         * [ImeInputView.onDetachedFromWindow] so a posted fallback doesn't
+         * fire into a dead view after teardown.
+         */
+        internal fun cancelPending() {
+            handler.removeCallbacks(enterFallbackRunnable)
+            enterHandledByKeyEvent = false
+        }
+
+        /** Drop in-flight composition state without touching the terminal output. */
+        internal fun resetComposition() {
+            composingText = ""
+        }
+
+        /**
+         * Erase whatever characters the current composition has projected into
+         * the terminal, and clear the tracking state. Used before
+         * [InputMethodManager.restartInput] so the fresh
+         * [TerminalInputConnection] starts from a consistent empty state.
+         */
+        internal fun flushCompositionAsBackspaces() {
+            if (composingText.isNotEmpty()) {
+                sendBackspaces(composingText.length)
+                composingText = ""
+            }
+        }
+    }
+
+    private companion object {
+        /**
+         * Upper bound on `deleteSurroundingText.leftLength`. Real IMEs request
+         * at most a few chars at a time; this cap protects against a runaway
+         * value from a buggy IME freezing the UI thread in a DEL-key loop.
+         */
+        const val MAX_DELETE_SURROUNDING = 4096
     }
 }
