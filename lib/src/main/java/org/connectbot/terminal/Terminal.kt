@@ -1184,9 +1184,17 @@ fun TerminalWithAccessibility(
         if (selectionManager.mode != SelectionMode.NONE && !selectionManager.isSelecting) {
             val range = selectionManager.selectionRange
             if (range != null) {
-                // Position copy button above the selection
+                // Position buttons above the selection. Clamp both axes so
+                // the Row stays within the terminal's viewport — selections
+                // that end near the right edge (or on row 0) used to push
+                // the Copy/Paste buttons off-screen.
                 val endPosition = range.getEndPosition()
-                val buttonX = endPosition.second * baseCharWidth
+                val rowWidthPx = with(density) {
+                    (COPY_BUTTON_SIZE * 2 + 4.dp).toPx()
+                }
+                val terminalWidthPx = screenState.snapshot.cols * baseCharWidth
+                val rawX = endPosition.second * baseCharWidth
+                val buttonX = rawX.coerceIn(0f, (terminalWidthPx - rowWidthPx).coerceAtLeast(0f))
                 val buttonY = endPosition.first * baseCharHeight - with(density) { COPY_BUTTON_OFFSET.toPx() }
 
                 Box(
