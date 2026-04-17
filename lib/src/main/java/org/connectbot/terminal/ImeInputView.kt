@@ -140,14 +140,18 @@ internal class ImeInputView(
 
         // Configure IME options. NO_PERSONALIZED_LEARNING tells on-device
         // IME features (Gboard's word bank, Gemini Nano / AI Core writing
-        // assist) to keep their hands off this field. TYPE_TEXT_FLAG_NO_SUGGESTIONS
-        // alone is no longer sufficient on recent Gboard builds — the mic
-        // and AI features live in the toolbar, separate from the suggestion
-        // strip, and only the learning-opt-out signal keeps them away.
+        // assist) to keep their hands off this field. On recent Gboard
+        // builds it's the single strongest signal — strong enough that
+        // Gboard also hides the microphone in response. So we only set it
+        // when the user has NOT explicitly opted into Standard keyboard —
+        // in Standard mode the user has asked for full IME features and
+        // we shouldn't suppress them.
+        val noLearning = if (allowStandardKeyboard) 0
+        else EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
         outAttrs.imeOptions = outAttrs.imeOptions or
                 EditorInfo.IME_FLAG_NO_EXTRACT_UI or
                 EditorInfo.IME_FLAG_NO_ENTER_ACTION or
-                EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING or
+                noLearning or
                 EditorInfo.IME_ACTION_NONE
 
         if (isComposeModeActive) {
