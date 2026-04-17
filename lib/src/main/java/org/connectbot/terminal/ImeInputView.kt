@@ -23,6 +23,9 @@ import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * A minimal invisible View that provides proper IME input handling for terminal emulation.
@@ -87,6 +90,16 @@ internal class ImeInputView(
                 inputMethodManager.restartInput(this)
             }
         }
+
+    /**
+     * Live IME composition text (romaji mid-conversion, pinyin candidates, etc.)
+     * Emits the empty string when no composition is active. Observed by the
+     * terminal UI to render a floating composer overlay near the cursor
+     * instead of projecting the partial text inline into the terminal.
+     * Never null; never empty+non-empty transitions spuriously.
+     */
+    private val _composingText = MutableStateFlow("")
+    val composingText: StateFlow<String> = _composingText.asStateFlow()
 
     /**
      * `restartInput()` discards the live [TerminalInputConnection]. If the
@@ -215,54 +228,31 @@ internal class ImeInputView(
             val newText = text?.toString() ?: ""
             super.setComposingText(text, newCursorPosition)
 
-            if (newText == composingText) {
-                return true
+            // Floating-composer model: the in-flight composition lives in an
+            // overlay, never in the terminal. We only update the tracker and
+            // the flow; no bytes hit the remote shell until commitText() fires.
+            // Crucial for CJK (romaji → kanji conversion used to flicker the
+            // terminal with backspace+rewrite each candidate) and for high-
+            // latency transports (mosh, ET) where those round-trips were slow.
+            if (newText != composingText) {
+                composingText = newText
+                _composingText.value = newText
             }
-
-            if (newText.isEmpty()) {
-                if (composingText.isNotEmpty()) {
-                    // Composition cleared by IME; remove the projected text from the terminal.
-                    sendBackspaces(composingText.length)
-                }
-                composingText = ""
-                return true
-            }
-
-            when {
-                newText.startsWith(composingText) -> {
-                    // Typical case: IME appends new chars to the composition
-                    val delta = newText.substring(composingText.length)
-                    sendTextInput(delta)
-                }
-
-                composingText.startsWith(newText) -> {
-                    // IME removed characters from the end of the composition
-                    val deleteCount = composingText.length - newText.length
-                    sendBackspaces(deleteCount)
-                }
-
-                else -> {
-                    // IME replaced the composition; rewrite it in the terminal
-                    sendBackspaces(composingText.length)
-                    sendTextInput(newText)
-                }
-            }
-
-            composingText = newText
             return true
         }
 
         override fun finishComposingText(): Boolean {
             super.finishComposingText()
             composingText = ""
+            _composingText.value = ""
             // Clear the internal Editable to prevent unbounded accumulation
             editable?.clear()
             return true
         }
 
         override fun deleteSurroundingText(leftLength: Int, rightLength: Int): Boolean {
-            // Handle backspace by sending DEL key events
-            // When IME sends delete, it often sends (0, 0) or (1, 0) for backspace
+            // Handle backspace by sending DEL key events.
+            // When IME sends delete, it often sends (0, 0) or (1, 0) for backspace.
             if (rightLength == 0 && leftLength == 0) {
                 return sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
             }
@@ -270,16 +260,27 @@ internal class ImeInputView(
             // Cap the loop: real IMEs send single-digit values here. A misbehaving
             // or hostile IME asking for ~2^31 deletions would freeze the UI thread.
             val bounded = leftLength.coerceIn(0, MAX_DELETE_SURROUNDING)
+
+            // If a composition is in flight, the IME is trying to delete part of
+            // ITS composition (e.g. user pressed backspace while composing). The
+            // composition lives only in the floating overlay, never in the
+            // terminal, so we must NOT send DEL keys to the shell — just shrink
+            // our tracker and let the overlay follow.
+            if (composingText.isNotEmpty()) {
+                val newLength = (composingText.length - bounded).coerceAtLeast(0)
+                composingText = composingText.substring(0, newLength)
+                _composingText.value = composingText
+                super.deleteSurroundingText(leftLength, rightLength)
+                return true
+            }
+
+            // No composition active — this is a real backspace through the IME,
+            // dispatch it to the terminal.
             for (i in 0 until bounded) {
                 sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
             }
 
             // TODO: Implement forward delete if rightLength > 0
-            if (bounded > 0 && composingText.isNotEmpty()) {
-                val newLength = (composingText.length - bounded).coerceAtLeast(0)
-                composingText = composingText.substring(0, newLength)
-            }
-
             super.deleteSurroundingText(leftLength, rightLength)
             return true
         }
@@ -333,9 +334,10 @@ internal class ImeInputView(
             suppressKeyEvents = false
 
             if (committedText.isNotEmpty()) {
-                if (composingText.isNotEmpty()) {
-                    sendBackspaces(composingText.length)
-                }
+                // The floating-composer model never projects the in-flight
+                // composition into the terminal, so there is nothing to erase
+                // here — just dispatch the final committed text.
+                //
                 // Filter newlines from committed text — Enter is handled by
                 // sendKeyEvent(KEYCODE_ENTER) when the IME sends both.
                 // For IMEs that only commitText("\n"), a deferred fallback
@@ -351,6 +353,7 @@ internal class ImeInputView(
                 }
             }
             composingText = ""
+            _composingText.value = ""
             // Clear the internal Editable to prevent unbounded accumulation
             editable?.clear()
             return true
@@ -381,18 +384,20 @@ internal class ImeInputView(
         /** Drop in-flight composition state without touching the terminal output. */
         internal fun resetComposition() {
             composingText = ""
+            _composingText.value = ""
         }
 
         /**
-         * Erase whatever characters the current composition has projected into
-         * the terminal, and clear the tracking state. Used before
-         * [InputMethodManager.restartInput] so the fresh
-         * [TerminalInputConnection] starts from a consistent empty state.
+         * Drop any in-flight composition before the enclosing view calls
+         * [InputMethodManager.restartInput]. Previously this also sent
+         * backspaces to the terminal because the composition had been
+         * projected inline; in the floating-composer model nothing was
+         * ever sent, so we only need to clear the tracker + overlay.
          */
         internal fun flushCompositionAsBackspaces() {
             if (composingText.isNotEmpty()) {
-                sendBackspaces(composingText.length)
                 composingText = ""
+                _composingText.value = ""
             }
         }
     }

@@ -45,6 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.SideEffect
@@ -449,6 +450,14 @@ fun TerminalWithAccessibility(
 
     // Keep reference to ImeInputView for controlling IME
     var imeInputView by remember { mutableStateOf<ImeInputView?>(null) }
+
+    // Live IME composition text (romaji mid-conversion, pinyin candidates).
+    // Rendered as a floating overlay near the terminal cursor so the partial
+    // text never has to be projected into the terminal itself — avoids the
+    // backspace-and-rewrite flicker that inline projection produced during
+    // CJK conversion, and avoids paying per-keystroke round-trips over mosh.
+    val imeComposerText by (imeInputView?.composingText
+        ?: remember { kotlinx.coroutines.flow.MutableStateFlow("") }).collectAsState()
 
     // Cleanup IME when component is disposed
     DisposableEffect(imeInputView) {
@@ -1342,6 +1351,22 @@ fun TerminalWithAccessibility(
                     )
                 }
 
+                // Draw IME composer overlay (romaji/pinyin etc. mid-composition).
+                // Rendered at the cursor; the remote shell sees nothing until the
+                // IME calls commitText() with the final selection.
+                if (imeComposerText.isNotEmpty() && screenState.scrollbackPosition == 0) {
+                    drawImeComposerOverlay(
+                        text = imeComposerText,
+                        cursorRow = screenState.snapshot.cursorRow,
+                        cursorCol = screenState.snapshot.cursorCol,
+                        totalCols = screenState.snapshot.cols,
+                        charWidth = baseCharWidth,
+                        charHeight = baseCharHeight,
+                        charBaseline = baseCharBaseline,
+                        textPaint = textPaint
+                    )
+                }
+
                 // Draw selection handles
                 if (selectionManager.mode != SelectionMode.NONE && !selectionManager.isSelecting) {
                     val range = selectionManager.selectionRange
@@ -1888,6 +1913,10 @@ private fun DrawScope.drawCursor(
  * Background color for the compose mode overlay.
  */
 private val COMPOSE_OVERLAY_BACKGROUND = Color(0xFF2E7D32).copy(alpha = 0.85f)
+// Distinct blue tint so the IME composer doesn't look identical to the
+// compose-key overlay — users can tell "romaji being converted" apart
+// from "compose key buffering".
+private val IME_COMPOSER_BACKGROUND = Color(0xFF1565C0).copy(alpha = 0.85f)
 
 /**
  * Width of the compose mode cursor bar in pixels.
@@ -1967,6 +1996,84 @@ private fun DrawScope.drawComposeOverlay(
         size = Size(COMPOSE_CURSOR_BAR_WIDTH, charHeight),
         alpha = CURSOR_LINE_ALPHA
     )
+}
+
+/**
+ * Draw the IME composer overlay at the terminal cursor. The partial IME
+ * composition (romaji being converted to kanji, pinyin candidates, swipe-
+ * typed word in progress, etc.) never reaches the terminal stream — it
+ * lives here until [TerminalInputConnection.commitText] fires. Distinct
+ * background tint from [drawComposeOverlay] so users can tell the compose
+ * key state apart from IME composition.
+ */
+private fun DrawScope.drawImeComposerOverlay(
+    text: String,
+    cursorRow: Int,
+    cursorCol: Int,
+    totalCols: Int,
+    charWidth: Float,
+    charHeight: Float,
+    charBaseline: Float,
+    textPaint: TextPaint,
+) {
+    if (text.isEmpty()) return
+    val x = cursorCol * charWidth
+    val y = cursorRow * charHeight
+    // Use TextPaint to measure real display width — matters for CJK glyphs
+    // whose visual width is ~2 cells rather than 1.
+    val measuredWidth = textPaint.measureText(text)
+    val availablePx = (totalCols - cursorCol) * charWidth
+
+    // If it overflows the line, slide-left with an ellipsis leader.
+    val displayText: String
+    val displayWidth: Float
+    if (measuredWidth > availablePx) {
+        val ellipsis = "\u2026"
+        var endIndex = text.length
+        // Walk back from the end until the ellipsis + tail fits.
+        while (endIndex > 0 &&
+            textPaint.measureText(ellipsis + text.substring(text.length - endIndex)) > availablePx
+        ) {
+            endIndex--
+        }
+        displayText = if (endIndex == 0) ellipsis
+        else ellipsis + text.substring(text.length - endIndex)
+        displayWidth = textPaint.measureText(displayText)
+    } else {
+        displayText = text
+        displayWidth = measuredWidth
+    }
+
+    drawRect(
+        color = IME_COMPOSER_BACKGROUND,
+        topLeft = Offset(x, y),
+        size = Size(displayWidth.coerceAtLeast(charWidth), charHeight),
+    )
+
+    val savedColor = textPaint.color
+    val savedBold = textPaint.isFakeBoldText
+    val savedSkew = textPaint.textSkewX
+    val savedUnderline = textPaint.isUnderlineText
+    val savedStrike = textPaint.isStrikeThruText
+
+    textPaint.color = Color.White.toArgb()
+    textPaint.isFakeBoldText = false
+    textPaint.textSkewX = 0f
+    textPaint.isUnderlineText = true
+    textPaint.isStrikeThruText = false
+
+    drawContext.canvas.nativeCanvas.drawText(
+        displayText,
+        x,
+        y + charBaseline,
+        textPaint,
+    )
+
+    textPaint.color = savedColor
+    textPaint.isFakeBoldText = savedBold
+    textPaint.textSkewX = savedSkew
+    textPaint.isUnderlineText = savedUnderline
+    textPaint.isStrikeThruText = savedStrike
 }
 
 /**
