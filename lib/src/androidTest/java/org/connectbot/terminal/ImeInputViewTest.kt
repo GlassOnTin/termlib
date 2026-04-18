@@ -270,4 +270,76 @@ class ImeInputViewTest {
         assertEquals("", ic.getEditable()?.toString())
         verify { imm.updateSelection(view, 0, 0, -1, -1) }
     }
+
+    // === CJK commit-text path (#96) ===
+    //
+    // Guards the path that carries a tapped kanji candidate from the IME's
+    // composition buffer into the terminal's input stream. mio-19 reported
+    // that on macOS + Gboard Japanese romaji the floating overlay shows the
+    // correct composition but the committed text lands garbled in the shell.
+    // These tests pin the Haven-side bytes so any future regression shows up
+    // here rather than in a user bug report.
+
+    @Test
+    fun testCommitTextWithBmpKanjiSendsExactUtf8Bytes() {
+        // 愛 is U+611B, BMP, encoded as 3 UTF-8 bytes: E6 84 9B.
+        val ic = makeView().ic()
+        ic.commitText("愛", 1)
+        verify { keyboardHandler.onTextInput("愛".toByteArray(Charsets.UTF_8)) }
+    }
+
+    @Test
+    fun testCommitTextWithSupplementaryPlaneKanjiSendsExactUtf8Bytes() {
+        // 𠮷 is U+20BB7 (supplementary plane — "tsuchi-yoshi", a Yoshinoya
+        // surname variant). Java String stores it as a surrogate pair
+        // (2 chars), UTF-8 is 4 bytes: F0 A0 AE B7. Catches any code path
+        // that iterates char-by-char instead of code-point-by-code-point.
+        val ic = makeView().ic()
+        ic.commitText("𠮷", 1)
+        verify { keyboardHandler.onTextInput("𠮷".toByteArray(Charsets.UTF_8)) }
+    }
+
+    @Test
+    fun testSetComposingThenCommitSendsFinalOnceAndNeverThePartial() {
+        // Simulates Gboard Japanese: romaji "a" arrives in composition,
+        // gets converted to hiragana "あ", then candidate "愛" replaces it,
+        // user taps the candidate → IME calls commitText("愛").
+        //
+        // Expectations:
+        //   - composingText flow transitions through the partials and empties on commit
+        //   - keyboardHandler.onTextInput fires exactly once, with "愛"
+        //   - no partial ("あ", "a") ever reaches the shell
+        val view = makeView()
+        val ic = view.ic()
+
+        ic.setComposingText("a", 1)
+        assertEquals("a", view.composingText.value)
+
+        ic.setComposingText("あ", 1)
+        assertEquals("あ", view.composingText.value)
+
+        ic.setComposingText("愛", 1)
+        assertEquals("愛", view.composingText.value)
+
+        ic.commitText("愛", 1)
+        assertEquals("", view.composingText.value)
+
+        verify(exactly = 1) { keyboardHandler.onTextInput("愛".toByteArray(Charsets.UTF_8)) }
+        verify(exactly = 0) { keyboardHandler.onTextInput("a".toByteArray(Charsets.UTF_8)) }
+        verify(exactly = 0) { keyboardHandler.onTextInput("あ".toByteArray(Charsets.UTF_8)) }
+    }
+
+    @Test
+    fun testCommitTextWithCombiningDakutenPreservesBoth() {
+        // "ば" can arrive two ways from an IME:
+        //   1. Precomposed U+3070 (one code point, 3-byte UTF-8)
+        //   2. Base は U+306F + combining dakuten U+3099 (two code points)
+        // Both should reach the shell byte-for-byte — no normalisation,
+        // no combining-mark dropping. Some Android IMEs pick form (2) for
+        // certain Japanese keyboards; losing the dakuten corrupts readings.
+        val ic = makeView().ic()
+        val decomposed = "\u306F\u3099"  // は + combining dakuten
+        ic.commitText(decomposed, 1)
+        verify { keyboardHandler.onTextInput(decomposed.toByteArray(Charsets.UTF_8)) }
+    }
 }
