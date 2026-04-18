@@ -272,11 +272,24 @@ internal class ImeInputView(
 
         override fun finishComposingText(): Boolean {
             super.finishComposingText()
+
+            // Replacement confirmed via finishComposingText (rather than
+            // commitText): the IME marked a region as composing then
+            // laid down a new composition on top. Some keyboards
+            // (Gboard's English autocorrect in particular) then fire
+            // finishComposingText to accept it, never a commitText. If
+            // we just clear state here the correction vanishes — apply
+            // it now.
+            if (pendingReplacementLength > 0 && composingText.isNotEmpty()) {
+                sendBackspaces(pendingReplacementLength)
+                sendTextInput(composingText)
+            }
+
             composingText = ""
             _composingText.value = ""
-            // A finish without a following commit means the pending
-            // replacement was cancelled — don't carry it into an
-            // unrelated future commit.
+            // Either applied above or cancelled without a commit — either
+            // way, don't carry a pending length into an unrelated future
+            // commit.
             pendingReplacementLength = 0
             // Clear the internal Editable to prevent unbounded accumulation
             editable?.clear()

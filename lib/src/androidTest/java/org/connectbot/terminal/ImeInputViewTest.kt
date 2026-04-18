@@ -439,6 +439,31 @@ class ImeInputViewTest {
     }
 
     @Test
+    fun testSetComposingRegionThenComposeThenFinishAppliesReplacement() {
+        // Variant of the autocorrect flow where Gboard confirms via
+        // finishComposingText rather than commitText:
+        //   setComposingRegion(0, 3)          mark "teh" as composing
+        //   setComposingText("the", 1)        lay down replacement
+        //   finishComposingText()             accept (no commitText!)
+        // Without handling this in finishComposingText, the correction
+        // never reaches the shell — the original repro for #99.
+        val ic = makeWiredView().ic()
+
+        ic.setComposingRegion(0, 3)
+        ic.setComposingText("the", 1)
+        ic.finishComposingText()
+
+        val keyEvents = mutableListOf<androidx.compose.ui.input.key.KeyEvent>()
+        verify { keyboardHandler.onKeyEvent(capture(keyEvents)) }
+        assertEquals(
+            "three DEL events to erase 'teh' before the replacement",
+            3,
+            keyEvents.count { it.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DEL },
+        )
+        verify(exactly = 1) { keyboardHandler.onTextInput("the".toByteArray(Charsets.UTF_8)) }
+    }
+
+    @Test
     fun testFinishComposingTextCancelsPendingReplacement() {
         // If the IME marks a region then finishes composition (without
         // committing replacement text) the pending length must be
