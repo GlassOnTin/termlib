@@ -224,6 +224,35 @@ internal class ImeInputView(
 
         private var composingText: String = ""
 
+        /**
+         * Number of chars the IME has asked us (via [setComposingRegion])
+         * to treat as re-composable. Consumed by the next [commitText] /
+         * [setComposingText], which back-spaces over that many chars
+         * before laying down its replacement.
+         *
+         * This is what makes English Gboard autocorrect work after a word
+         * boundary: the IME marks the already-committed word as a
+         * composing region and then commits the correction. Without this,
+         * the correction just appends (terminal ends up with "teh the ").
+         */
+        private var pendingReplacementLength: Int = 0
+
+        override fun setComposingRegion(start: Int, end: Int): Boolean {
+            super.setComposingRegion(start, end)
+            // Only honour this when no composition is already in flight.
+            // An active composition means the IME is re-scoping its own
+            // ongoing composition, which the floating-composer tracker in
+            // [composingText] already handles — translating to terminal
+            // backspaces there would double-erase.
+            if (composingText.isEmpty()) {
+                // Cap at a sane word/phrase length. A runaway IME handing us
+                // e.g. the whole document length would otherwise blow away
+                // the user's shell history on the next commit.
+                pendingReplacementLength = (end - start).coerceIn(0, MAX_REPLACEMENT_LENGTH)
+            }
+            return true
+        }
+
         override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
             val newText = text?.toString() ?: ""
             super.setComposingText(text, newCursorPosition)
@@ -245,6 +274,10 @@ internal class ImeInputView(
             super.finishComposingText()
             composingText = ""
             _composingText.value = ""
+            // A finish without a following commit means the pending
+            // replacement was cancelled — don't carry it into an
+            // unrelated future commit.
+            pendingReplacementLength = 0
             // Clear the internal Editable to prevent unbounded accumulation
             editable?.clear()
             return true
@@ -344,6 +377,14 @@ internal class ImeInputView(
                 // dispatches Enter after one frame if sendKeyEvent didn't fire.
                 val filtered = committedText.replace("\n", "").replace("\r", "")
                 if (filtered.isNotEmpty()) {
+                    // If the IME earlier marked a region as composing (English
+                    // autocorrect: "teh " selected for replacement with "the"),
+                    // back-space that many chars before laying the new text
+                    // down. See [setComposingRegion] + [pendingReplacementLength].
+                    if (pendingReplacementLength > 0) {
+                        sendBackspaces(pendingReplacementLength)
+                        pendingReplacementLength = 0
+                    }
                     sendTextInput(filtered)
                 } else if (committedText.contains('\n') || committedText.contains('\r')) {
                     // Defer Enter dispatch — give sendKeyEvent a chance to handle it
@@ -385,6 +426,7 @@ internal class ImeInputView(
         internal fun resetComposition() {
             composingText = ""
             _composingText.value = ""
+            pendingReplacementLength = 0
         }
 
         /**
@@ -399,6 +441,12 @@ internal class ImeInputView(
                 composingText = ""
                 _composingText.value = ""
             }
+            pendingReplacementLength = 0
+        }
+
+        /** Drop any pending setComposingRegion replacement without consuming it. */
+        internal fun resetPendingReplacement() {
+            pendingReplacementLength = 0
         }
     }
 
@@ -409,5 +457,13 @@ internal class ImeInputView(
          * value from a buggy IME freezing the UI thread in a DEL-key loop.
          */
         const val MAX_DELETE_SURROUNDING = 4096
+
+        /**
+         * Upper bound on an IME-requested `setComposingRegion` length. Real
+         * IMEs use this for word-level corrections (≤20 chars). Capping
+         * prevents a misaligned IME state from sending a runaway backspace
+         * count on the following commit.
+         */
+        const val MAX_REPLACEMENT_LENGTH = 64
     }
 }

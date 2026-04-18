@@ -342,4 +342,121 @@ class ImeInputViewTest {
         ic.commitText(decomposed, 1)
         verify { keyboardHandler.onTextInput(decomposed.toByteArray(Charsets.UTF_8)) }
     }
+
+    // === English Gboard autocorrect after word boundary (#99) ===
+    //
+    // When Gboard offers a correction in the suggestion bar after a word
+    // has been committed, tapping the correction emits a
+    // `setComposingRegion(start, end)` covering the already-committed
+    // word, then a `commitText("the", 1)` with the replacement. Without
+    // translating the composing-region length into terminal backspaces,
+    // the correction just appends (terminal ends up with "teh the ").
+
+    /**
+     * Wire a view so dispatched key events (e.g. from
+     * [BaseInputConnection.sendKeyEvent]) are forwarded to the
+     * [keyboardHandler] mock — mirroring Haven's production wiring via
+     * [ImeInputView.setOnKeyListener]. Without this, `sendBackspaces`
+     * inside the connection fires into a View that has no listener, and
+     * the mock never sees the onKeyEvent calls.
+     */
+    private fun makeWiredView(): ImeInputView {
+        val view = makeView()
+        view.setOnKeyListener { _, _, event ->
+            keyboardHandler.onKeyEvent(
+                androidx.compose.ui.input.key.KeyEvent(event),
+            )
+            false
+        }
+        return view
+    }
+
+    @Test
+    fun testSetComposingRegionThenCommitBackspacesOverPriorWord() {
+        val ic = makeWiredView().ic()
+
+        // Simulate the pre-correction state: "teh " has already been
+        // committed to the terminal, so nothing buffered in our side.
+        // Then Gboard marks "teh" as composing and commits "the".
+        ic.setComposingRegion(0, 3)
+        ic.commitText("the", 1)
+
+        // Three DEL keycodes for "teh", then "the" committed.
+        val keyEvents = mutableListOf<androidx.compose.ui.input.key.KeyEvent>()
+        verify { keyboardHandler.onKeyEvent(capture(keyEvents)) }
+        assertEquals(
+            "expected exactly 3 DEL key events to back-space over 'teh'",
+            3,
+            keyEvents.count { it.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DEL },
+        )
+        verify(exactly = 1) { keyboardHandler.onTextInput("the".toByteArray(Charsets.UTF_8)) }
+    }
+
+    @Test
+    fun testSetComposingRegionLengthIsCappedAtMax() {
+        // Guard against a runaway IME asking us to back-space the whole
+        // scrollback. The cap is internal to ImeInputView (currently 64);
+        // assert we never dispatch more than that even for a huge range.
+        val ic = makeWiredView().ic()
+
+        ic.setComposingRegion(0, 10_000)
+        ic.commitText("x", 1)
+
+        val delCount = mutableListOf<androidx.compose.ui.input.key.KeyEvent>()
+        verify { keyboardHandler.onKeyEvent(capture(delCount)) }
+        assertEquals(
+            "DEL dispatch must be capped",
+            true,
+            delCount.count { it.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DEL } <= 64,
+        )
+    }
+
+    @Test
+    fun testSetComposingRegionDuringActiveCompositionIsIgnored() {
+        // If an IME re-scopes its own in-flight composition via
+        // setComposingRegion while composingText is non-empty, we must
+        // NOT translate that to terminal backspaces — the floating
+        // composer already owns that text, and double-erasing would
+        // delete characters the user actually typed before the
+        // composition started.
+        val ic = makeWiredView().ic()
+
+        ic.setComposingText("te", 1)
+        // IME now re-scopes the composing region to a smaller slice.
+        ic.setComposingRegion(0, 2)
+        ic.commitText("the", 1)
+
+        // Only the final committed text should hit the shell — no DEL
+        // keys from a bogus replacement.
+        val keyEvents = mutableListOf<androidx.compose.ui.input.key.KeyEvent>()
+        verify(atLeast = 0) { keyboardHandler.onKeyEvent(capture(keyEvents)) }
+        assertEquals(
+            "re-scoping an active composition must not dispatch terminal DELs",
+            0,
+            keyEvents.count { it.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DEL },
+        )
+        verify(exactly = 1) { keyboardHandler.onTextInput("the".toByteArray(Charsets.UTF_8)) }
+    }
+
+    @Test
+    fun testFinishComposingTextCancelsPendingReplacement() {
+        // If the IME marks a region then finishes composition (without
+        // committing replacement text) the pending length must be
+        // dropped — otherwise the next unrelated commit would eat
+        // characters from the terminal.
+        val ic = makeWiredView().ic()
+
+        ic.setComposingRegion(0, 3)
+        ic.finishComposingText()
+        ic.commitText("x", 1)
+
+        val keyEvents = mutableListOf<androidx.compose.ui.input.key.KeyEvent>()
+        verify(atLeast = 0) { keyboardHandler.onKeyEvent(capture(keyEvents)) }
+        assertEquals(
+            "finishComposingText must drop the pending replacement length",
+            0,
+            keyEvents.count { it.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DEL },
+        )
+        verify(exactly = 1) { keyboardHandler.onTextInput("x".toByteArray(Charsets.UTF_8)) }
+    }
 }
