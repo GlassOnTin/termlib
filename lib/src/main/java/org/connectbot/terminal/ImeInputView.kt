@@ -161,8 +161,17 @@ internal class ImeInputView(
         // we shouldn't suppress them.
         val noLearning = if (allowStandardKeyboard) 0
         else EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+        // NO_EXTRACT_UI suppresses the IME's fullscreen-editor UI in
+        // landscape. For Secure/Compose modes this is right — we render
+        // our own text. But in Standard keyboard mode the user has
+        // explicitly opted into full IME features, and some IMEs
+        // (Gboard included) interpret NO_EXTRACT_UI as "this field
+        // doesn't want rich editing" and suppress composition-based
+        // autocorrect.
+        val noExtractUi = if (allowStandardKeyboard) 0
+        else EditorInfo.IME_FLAG_NO_EXTRACT_UI
         outAttrs.imeOptions = outAttrs.imeOptions or
-                EditorInfo.IME_FLAG_NO_EXTRACT_UI or
+                noExtractUi or
                 EditorInfo.IME_FLAG_NO_ENTER_ACTION or
                 noLearning or
                 EditorInfo.IME_ACTION_NONE
@@ -177,9 +186,17 @@ internal class ImeInputView(
             outAttrs.initialSelStart = 0
             outAttrs.initialSelEnd = 0
         } else if (allowStandardKeyboard) {
-            // Standard keyboard: voice input, swipe typing, autocomplete enabled.
-            // The IME may learn typed input including passwords.
-            outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT
+            // Standard keyboard: voice input, swipe typing, autocomplete
+            // and autocorrect all enabled. The IME may learn typed input
+            // including passwords.
+            //
+            // TYPE_TEXT_FLAG_AUTO_CORRECT tells the IME "this field wants
+            // correction-as-you-type" — without it, Gboard shows
+            // suggestions but never triggers the composition-based
+            // replacement protocol (setComposingRegion + commitText).
+            // See #99.
+            outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT or
+                    EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT
         } else {
             // Terminal mode (default):
             // TYPE_CLASS_TEXT enables IME composition (required for CJK input
@@ -190,7 +207,15 @@ internal class ImeInputView(
                     EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         }
 
-        return TerminalInputConnection(this, isComposeModeActive).also { activeConnection = it }
+        // fullEditor=true gives BaseInputConnection a real Editable, which
+        // Gboard needs to track replacement ranges for autocorrect via
+        // setComposingRegion / deleteSurroundingText. Enable it whenever
+        // the user has opted into a mode that allows IME suggestions —
+        // compose mode (CJK) and Standard keyboard. Leave it off for
+        // default Secure mode where NO_SUGGESTIONS is already set and we
+        // don't want the editable to accumulate shell input.
+        val fullEditor = isComposeModeActive || allowStandardKeyboard
+        return TerminalInputConnection(this, fullEditor).also { activeConnection = it }
     }
 
     override fun onCheckIsTextEditor(): Boolean = !rawKeyboardMode
@@ -291,8 +316,11 @@ internal class ImeInputView(
             // way, don't carry a pending length into an unrelated future
             // commit.
             pendingReplacementLength = 0
-            // Clear the internal Editable to prevent unbounded accumulation
-            editable?.clear()
+            // Do NOT clear the editable here. finishComposingText only
+            // signals end of ONE composition event, not end of the
+            // whole input. Clearing would wipe the context Gboard uses
+            // to decide whether to offer a correction on the next word.
+            // Enter (in sendKeyEvent) is the one real reset point.
             return true
         }
 
@@ -354,16 +382,24 @@ internal class ImeInputView(
 
         override fun sendKeyEvent(event: KeyEvent): Boolean {
             if (suppressKeyEvents) return true
-            if (event.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_ENTER) {
+            val isEnterDown = event.action == KeyEvent.ACTION_DOWN &&
+                event.keyCode == KeyEvent.KEYCODE_ENTER
+            if (isEnterDown) {
                 // Real Enter from IME — cancel any deferred commitText Enter
                 enterHandledByKeyEvent = true
                 handler.removeCallbacks(enterFallbackRunnable)
             }
             val result = this@ImeInputView.dispatchKeyEvent(event)
-            // After any key event, clear the IME's text buffer and reset the selection to (0,0).
-            // This prevents Gboard from accumulating terminal input into its suggestion context
-            // (e.g. treating "git status<enter>ls -l" as a single suggestion candidate).
-            if (event.action == KeyEvent.ACTION_DOWN) {
+            // Clear the IME's text buffer + reset selection ONLY on Enter.
+            // Previously this ran after any ACTION_DOWN which clobbered
+            // Gboard's editable-tracking after every backspace / DEL we
+            // dispatched (including our own autocorrect backspaces), so
+            // Gboard could never build up enough context to offer
+            // composition-based corrections. Enter is the one real
+            // command-boundary signal where dropping accumulated IME
+            // state is correct — prevents "git status<enter>ls -l"
+            // from landing in Gboard's suggestion bar as one candidate.
+            if (isEnterDown) {
                 editable?.clear()
                 inputMethodManager.updateSelection(this@ImeInputView, 0, 0, -1, -1)
             }
@@ -408,8 +444,22 @@ internal class ImeInputView(
             }
             composingText = ""
             _composingText.value = ""
-            // Clear the internal Editable to prevent unbounded accumulation
-            editable?.clear()
+            // Do NOT clear the editable here — Gboard needs recent chars
+            // in the Editable to decide whether to offer an autocorrect
+            // suggestion and to route replacement via setComposingRegion.
+            // Clearing on every commit leaves it permanently empty, which
+            // drops Gboard into a dumb per-char insert mode (the #99
+            // symptom). Enter still clears on the sendKeyEvent path to
+            // avoid one command's text carrying into the next.
+            //
+            // Runaway protection: cap the editable length at
+            // EDITABLE_MAX_LENGTH; if a caller commits more than that
+            // without hitting Enter, drop the oldest half.
+            editable?.let { ed ->
+                if (ed.length > EDITABLE_MAX_LENGTH) {
+                    ed.delete(0, ed.length / 2)
+                }
+            }
             return true
         }
 
@@ -478,5 +528,15 @@ internal class ImeInputView(
          * count on the following commit.
          */
         const val MAX_REPLACEMENT_LENGTH = 64
+
+        /**
+         * Soft ceiling on the [BaseInputConnection] editable length. Enter
+         * clears it normally, but a user who types a very long command
+         * without pressing Enter would otherwise accumulate forever.
+         * When exceeded we drop the first half — plenty of context left
+         * for Gboard's correction window (usually the current word),
+         * without unbounded memory growth.
+         */
+        const val EDITABLE_MAX_LENGTH = 512
     }
 }

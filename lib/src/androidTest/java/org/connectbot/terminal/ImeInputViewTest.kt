@@ -70,13 +70,21 @@ class ImeInputViewTest {
     }
 
     @Test
-    fun testSendBackspaceKeyDownClearsEditable() {
+    fun testSendBackspaceKeyDownDoesNotClearEditable() {
+        // sendKeyEvent(DEL) lets BaseInputConnection handle editable
+        // state on its own — we don't forcibly clear. Only Enter
+        // clears (command boundary). Keeping editable stable across
+        // DELs is what lets Gboard track replacement ranges for
+        // composition-based autocorrect (#99).
         val ic = makeView().ic()
         ic.commitText("abc", 1)
+        val beforeDel = ic.getEditable()?.toString() ?: ""
 
         ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
 
-        assertEquals("", ic.getEditable()?.toString())
+        // The editable should not be forcibly cleared — whatever
+        // BaseInputConnection does with it is what we have.
+        assertEquals(beforeDel, ic.getEditable()?.toString())
     }
 
     @Test
@@ -93,21 +101,47 @@ class ImeInputViewTest {
         assertEquals("", ic.getEditable()?.toString())
     }
 
-    // === commitText clears editable (regression guard) ===
+    // === commitText retains committed text in editable ===
+    //
+    // Gboard needs recent chars in the BaseInputConnection editable to
+    // decide whether to offer an autocorrect suggestion and to route a
+    // replacement via setComposingRegion. Clearing after every commit
+    // (the old behaviour) dropped Gboard into per-char insert mode and
+    // disabled autocorrect (the #99 symptom). Enter still clears on the
+    // sendKeyEvent path so one command's text doesn't carry into the
+    // next.
 
     @Test
-    fun testCommitTextClearsEditable() {
-        val ic = makeView().ic()
+    fun testCommitTextRetainsTextInEditableWhenStandardKeyboard() {
+        // Standard keyboard mode → fullEditor=true → BaseInputConnection
+        // provides a real Editable that persists across commits so Gboard
+        // can offer autocorrect on the retained text.
+        val view = makeView().apply { allowStandardKeyboard = true }
+        val ic = view.ic()
         ic.commitText("some text", 1)
 
-        assertEquals("", ic.getEditable()?.toString())
+        assertEquals("some text", ic.getEditable()?.toString())
     }
 
     @Test
-    fun testCommitTextWithActiveCompositionClearsEditable() {
-        val ic = makeView().ic()
+    fun testCommitTextWithActiveCompositionRetainsReplacementWhenStandardKeyboard() {
+        val view = makeView().apply { allowStandardKeyboard = true }
+        val ic = view.ic()
         ic.setComposingText("wor", 1)
         ic.commitText("word", 1)
+
+        assertEquals("word", ic.getEditable()?.toString())
+    }
+
+    @Test
+    fun testCommitTextInSecureModeLeavesEditableEmpty() {
+        // Default Secure mode → fullEditor=false → the Editable is a
+        // no-op proxy; writes through super.commitText don't persist.
+        // That's correct for Secure mode (no suggestions / no Gboard
+        // autocorrect anyway), and it means shell output can't leak
+        // into an IME suggestion buffer.
+        val ic = makeView().ic()
+        ic.commitText("some text", 1)
 
         assertEquals("", ic.getEditable()?.toString())
     }
@@ -138,7 +172,12 @@ class ImeInputViewTest {
     }
 
     @Test
-    fun testUpdateSelectionCalledAfterBackspaceKeyDown() {
+    fun testUpdateSelectionNotCalledAfterBackspaceKeyDown() {
+        // Non-Enter key events must NOT reset the IME's tracked
+        // selection: Gboard needs stable selection updates to offer
+        // composition-based autocorrect. An IME-dispatched DEL (or any
+        // other non-Enter key) lets BaseInputConnection handle editable
+        // state on its own.
         val imm = mockk<InputMethodManager>(relaxed = true)
         val view = makeView(imm)
         val ic = view.ic()
@@ -146,7 +185,7 @@ class ImeInputViewTest {
         ic.commitText("abc", 1)
         ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
 
-        verify { imm.updateSelection(view, 0, 0, -1, -1) }
+        verify(exactly = 0) { imm.updateSelection(view, 0, 0, -1, -1) }
     }
 
     @Test
