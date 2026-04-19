@@ -17,6 +17,7 @@
 package org.connectbot.terminal
 
 import android.content.Context
+import android.text.Selection
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.BaseInputConnection
@@ -244,10 +245,39 @@ internal class ImeInputView(
      */
     private inner class TerminalInputConnection(
         targetView: View,
-        fullEditor: Boolean
+        private val fullEditor: Boolean
     ) : BaseInputConnection(targetView, fullEditor) {
 
         private var composingText: String = ""
+
+        /**
+         * Tell the IME where the cursor is. Custom InputConnection
+         * implementations are required to do this explicitly after every
+         * edit — TextView/EditText get it for free via the view layer, but
+         * BaseInputConnection does not. Without these calls Gboard keeps
+         * its own cursor-tracking frozen at (0, 0), never re-queries
+         * [getTextBeforeCursor], and therefore never enters the
+         * composition-based replacement protocol that word-level
+         * autocorrect relies on (#99).
+         *
+         * Derives selection + composing-region positions from the
+         * underlying [Editable], which is the single source of truth —
+         * [BaseInputConnection] keeps it in sync as part of each super.*
+         * call. Only fires in modes where [fullEditor] is true; in Secure
+         * mode the Editable is a no-op proxy and the selection never
+         * actually advances.
+         */
+        private fun notifyImeSelection() {
+            if (!fullEditor) return
+            val ed = editable ?: return
+            inputMethodManager.updateSelection(
+                this@ImeInputView,
+                Selection.getSelectionStart(ed),
+                Selection.getSelectionEnd(ed),
+                getComposingSpanStart(ed),
+                getComposingSpanEnd(ed),
+            )
+        }
 
         /**
          * Number of chars the IME has asked us (via [setComposingRegion])
@@ -275,6 +305,7 @@ internal class ImeInputView(
                 // the user's shell history on the next commit.
                 pendingReplacementLength = (end - start).coerceIn(0, MAX_REPLACEMENT_LENGTH)
             }
+            notifyImeSelection()
             return true
         }
 
@@ -292,6 +323,7 @@ internal class ImeInputView(
                 composingText = newText
                 _composingText.value = newText
             }
+            notifyImeSelection()
             return true
         }
 
@@ -321,6 +353,7 @@ internal class ImeInputView(
             // whole input. Clearing would wipe the context Gboard uses
             // to decide whether to offer a correction on the next word.
             // Enter (in sendKeyEvent) is the one real reset point.
+            notifyImeSelection()
             return true
         }
 
@@ -345,6 +378,7 @@ internal class ImeInputView(
                 composingText = composingText.substring(0, newLength)
                 _composingText.value = composingText
                 super.deleteSurroundingText(leftLength, rightLength)
+                notifyImeSelection()
                 return true
             }
 
@@ -356,6 +390,7 @@ internal class ImeInputView(
 
             // TODO: Implement forward delete if rightLength > 0
             super.deleteSurroundingText(leftLength, rightLength)
+            notifyImeSelection()
             return true
         }
 
@@ -380,6 +415,32 @@ internal class ImeInputView(
             enterHandledByKeyEvent = false
         }
 
+        /**
+         * IME moved the cursor explicitly (e.g. the user tapped to
+         * place the caret inside an existing word). Mirror the new
+         * position back to Gboard so its tracked selection stays in
+         * sync with the Editable.
+         */
+        override fun setSelection(start: Int, end: Int): Boolean {
+            val r = super.setSelection(start, end)
+            notifyImeSelection()
+            return r
+        }
+
+        /**
+         * Code-point variant of [deleteSurroundingText]. BaseInputConnection
+         * handles the editable update; we just mirror the selection back
+         * to the IME so it doesn't fall out of sync.
+         */
+        override fun deleteSurroundingTextInCodePoints(
+            beforeLength: Int,
+            afterLength: Int,
+        ): Boolean {
+            val r = super.deleteSurroundingTextInCodePoints(beforeLength, afterLength)
+            notifyImeSelection()
+            return r
+        }
+
         override fun sendKeyEvent(event: KeyEvent): Boolean {
             if (suppressKeyEvents) return true
             val isEnterDown = event.action == KeyEvent.ACTION_DOWN &&
@@ -402,6 +463,54 @@ internal class ImeInputView(
             if (isEnterDown) {
                 editable?.clear()
                 inputMethodManager.updateSelection(this@ImeInputView, 0, 0, -1, -1)
+            }
+            return result
+        }
+
+        /**
+         * API 34+ autocorrect replacement path. Gboard on Android 14+
+         * uses this instead of `setComposingRegion` + `commitText` when
+         * the user taps a suggestion-bar correction for an
+         * already-committed word. [BaseInputConnection.replaceText]
+         * rewrites the internal [Editable] via `content.replace(start,
+         * end, text)` but — unlike `commitText` — doesn't dispatch key
+         * events or otherwise inform the host of the change. Without
+         * overriding this, Gboard's correction lands in our Editable
+         * but never reaches the shell, leaving the terminal with the
+         * uncorrected typing.
+         *
+         * Translation: the editable is a mirror of the characters the
+         * terminal has received, so replacing `[start, end)` with
+         * `text` maps to `(end - start)` backspaces followed by
+         * emitting `text`. Only correct when `end` is at the cursor —
+         * autocorrect always replaces the current word, so that holds
+         * in practice. If an IME ever calls this with `end` mid-buffer
+         * we log and stay conservative (editable updates, terminal
+         * doesn't), because re-emitting the suffix is unsafe (the
+         * shell may have moved the cursor, processed escapes, etc.).
+         */
+        override fun replaceText(
+            start: Int,
+            end: Int,
+            text: CharSequence,
+            newCursorPosition: Int,
+            textAttribute: android.view.inputmethod.TextAttribute?,
+        ): Boolean {
+            val ed = editable
+            val cursorBefore = ed?.let { Selection.getSelectionStart(it) } ?: -1
+            val result = super.replaceText(start, end, text, newCursorPosition, textAttribute)
+            notifyImeSelection()
+
+            // Only rewrite the terminal when the replacement ends at the
+            // current cursor — i.e. Gboard is correcting the last word.
+            // An IME replacing mid-buffer text would require us to also
+            // re-emit the suffix, which isn't safe because the shell may
+            // have already echoed / processed those bytes.
+            if (ed != null && end == cursorBefore && start in 0..end) {
+                val backspaces = end - start
+                if (backspaces > 0) sendBackspaces(backspaces)
+                val replacement = text.toString().replace("\n", "").replace("\r", "")
+                if (replacement.isNotEmpty()) sendTextInput(replacement)
             }
             return result
         }
@@ -460,12 +569,32 @@ internal class ImeInputView(
                     ed.delete(0, ed.length / 2)
                 }
             }
+            // Tell the IME the cursor moved. Without this Gboard keeps
+            // its tracked selection frozen at (0, 0), never re-queries
+            // [getTextBeforeCursor], and therefore never enters the
+            // composition protocol for word-level autocorrect. See
+            // [notifyImeSelection].
+            notifyImeSelection()
             return true
         }
 
+        /**
+         * Dispatch backspaces to the terminal without triggering the
+         * enclosing view's key listener. That listener (see Terminal's
+         * [setOnKeyListener]) calls [resetImeBuffer] on every
+         * ACTION_DOWN to keep the IME's editable in sync with physical
+         * keyboard input. For our internal autocorrect / replacement
+         * flow that side-effect is actively harmful: it wipes the
+         * Editable Gboard has just been notified about, so the IME
+         * loses context one keystroke after we just established it.
+         * Route straight to [KeyboardHandler.onKeyEvent] instead.
+         */
         private fun sendBackspaces(count: Int) {
             repeat(count.coerceAtLeast(0)) {
-                sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+                val native = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL)
+                keyboardHandler.onKeyEvent(
+                    androidx.compose.ui.input.key.KeyEvent(native),
+                )
             }
         }
 

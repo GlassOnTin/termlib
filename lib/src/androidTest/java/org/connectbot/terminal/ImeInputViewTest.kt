@@ -502,6 +502,195 @@ class ImeInputViewTest {
         verify(exactly = 1) { keyboardHandler.onTextInput("the".toByteArray(Charsets.UTF_8)) }
     }
 
+    // === replaceText (API 34+ autocorrect path, #99 primary fix) ===
+    //
+    // On Android 14+ Gboard uses InputConnection.replaceText for
+    // suggestion-bar word corrections instead of the older
+    // setComposingRegion + commitText sequence. BaseInputConnection's
+    // default rewrites the Editable directly without informing the
+    // host, so the terminal never sees the replacement.
+
+    @Test
+    fun testReplaceTextAtCursorBackspacesPriorWordAndSendsReplacement() {
+        val ic = makeWiredView().apply { allowStandardKeyboard = true }.ic()
+
+        // Mirror the pre-correction state: "I'll ty" has been committed
+        // to the terminal. Then Gboard corrects "y" → "ry " at 6..7.
+        ic.commitText("I'll ty", 1)
+        ic.replaceText(6, 7, "ry ", 1, null)
+
+        // One DEL to erase "y", then "ry " committed.
+        val keyEvents = mutableListOf<androidx.compose.ui.input.key.KeyEvent>()
+        verify { keyboardHandler.onKeyEvent(capture(keyEvents)) }
+        val delCount = keyEvents.count { it.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DEL }
+        assertEquals("expected 1 DEL to erase 'y'", 1, delCount)
+        verify(exactly = 1) { keyboardHandler.onTextInput("ry ".toByteArray(Charsets.UTF_8)) }
+    }
+
+    @Test
+    fun testReplaceTextMultiCharAtCursor() {
+        val ic = makeWiredView().apply { allowStandardKeyboard = true }.ic()
+
+        // "I'll try wth" — Gboard corrects "th" at 10..12 with "ith ".
+        ic.commitText("I'll try wth", 1)
+        ic.replaceText(10, 12, "ith ", 1, null)
+
+        val keyEvents = mutableListOf<androidx.compose.ui.input.key.KeyEvent>()
+        verify { keyboardHandler.onKeyEvent(capture(keyEvents)) }
+        val delCount = keyEvents.count { it.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DEL }
+        assertEquals("expected 2 DELs to erase 'th'", 2, delCount)
+        verify(exactly = 1) { keyboardHandler.onTextInput("ith ".toByteArray(Charsets.UTF_8)) }
+    }
+
+    @Test
+    fun testReplaceTextMidBufferDoesNotRewriteTerminal() {
+        // If an IME ever calls replaceText with end != cursor, we skip
+        // the terminal rewrite rather than risk garbling shell state.
+        // The editable still updates (for IME context) but the
+        // terminal keeps whatever the user actually typed.
+        val ic = makeWiredView().apply { allowStandardKeyboard = true }.ic()
+
+        ic.commitText("hello world", 1)  // cursor at 11
+        // Replace "hello" at 0..5 — end (5) != cursor (11).
+        ic.replaceText(0, 5, "HELLO", 1, null)
+
+        val keyEvents = mutableListOf<androidx.compose.ui.input.key.KeyEvent>()
+        verify(atLeast = 0) { keyboardHandler.onKeyEvent(capture(keyEvents)) }
+        val delCount = keyEvents.count { it.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DEL }
+        assertEquals(
+            "mid-buffer replace must not dispatch terminal DELs",
+            0,
+            delCount,
+        )
+        verify(exactly = 0) { keyboardHandler.onTextInput("HELLO".toByteArray(Charsets.UTF_8)) }
+    }
+
+    @Test
+    fun testReplaceTextNotifiesUpdateSelection() {
+        val imm = mockk<InputMethodManager>(relaxed = true)
+        val view = makeView(imm).apply { allowStandardKeyboard = true }
+        val ic = view.ic()
+
+        ic.commitText("teh", 1)
+        ic.replaceText(0, 3, "the", 1, null)
+
+        // After replace: editable "the", cursor 3.
+        verify { imm.updateSelection(view, 3, 3, -1, -1) }
+    }
+
+    // === updateSelection notifications after IME edits (#99 follow-up) ===
+    //
+    // Custom InputConnection implementations are required to call
+    // InputMethodManager.updateSelection after every edit — TextView does
+    // this implicitly but BaseInputConnection does not. Without these
+    // callbacks Gboard's tracked cursor stays frozen at (0, 0), so it
+    // never re-queries getTextBeforeCursor and never enters the
+    // composition protocol that word-level autocorrect relies on.
+    //
+    // These tests pin the notification at each edit path in Standard
+    // keyboard mode (fullEditor=true). Secure mode uses a no-op editable
+    // and intentionally skips notification — no useful selection to report.
+
+    @Test
+    fun testCommitTextInStandardModeNotifiesUpdateSelection() {
+        val imm = mockk<InputMethodManager>(relaxed = true)
+        val view = makeView(imm).apply { allowStandardKeyboard = true }
+        val ic = view.ic()
+
+        ic.commitText("hi", 1)
+
+        // After "hi" editable + selection=2, no composition.
+        verify { imm.updateSelection(view, 2, 2, -1, -1) }
+    }
+
+    @Test
+    fun testCommitTextInSecureModeDoesNotNotifyUpdateSelection() {
+        // Secure mode uses a no-op editable; selection never actually
+        // advances so there is nothing useful to tell the IME. Leaving
+        // notification off here also preserves the existing
+        // testUpdateSelectionNotCalledAfterBackspaceKeyDown contract.
+        val imm = mockk<InputMethodManager>(relaxed = true)
+        val view = makeView(imm)
+        val ic = view.ic()
+
+        ic.commitText("abc", 1)
+
+        verify(exactly = 0) { imm.updateSelection(any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun testSetComposingTextNotifiesUpdateSelectionWithCompositionRegion() {
+        val imm = mockk<InputMethodManager>(relaxed = true)
+        val view = makeView(imm).apply { allowStandardKeyboard = true }
+        val ic = view.ic()
+
+        ic.setComposingText("abc", 1)
+
+        // Composition covers 0..3, selection at end of composition.
+        verify { imm.updateSelection(view, 3, 3, 0, 3) }
+    }
+
+    @Test
+    fun testFinishComposingTextNotifiesUpdateSelectionWithNoComposition() {
+        val imm = mockk<InputMethodManager>(relaxed = true)
+        val view = makeView(imm).apply { allowStandardKeyboard = true }
+        val ic = view.ic()
+
+        ic.setComposingText("abc", 1)
+        ic.finishComposingText()
+
+        // After finish: composition cleared, candidatesStart/End = -1.
+        verify { imm.updateSelection(view, 3, 3, -1, -1) }
+    }
+
+    @Test
+    fun testSetComposingRegionNotifiesUpdateSelection() {
+        val imm = mockk<InputMethodManager>(relaxed = true)
+        val view = makeView(imm).apply { allowStandardKeyboard = true }
+        val ic = view.ic()
+
+        // Put "teh " in the editable then mark the word as composing.
+        ic.commitText("teh ", 1)
+        ic.setComposingRegion(0, 3)
+
+        // Selection stays at end (4), composition region is 0..3.
+        verify { imm.updateSelection(view, 4, 4, 0, 3) }
+    }
+
+    @Test
+    fun testAutocorrectFlowNotifiesUpdateSelectionAtEachStep() {
+        // End-to-end: "teh " committed, Gboard marks 0..3 as composing,
+        // then commits replacement "the" — IME must see selection move
+        // through the full trajectory for its state machine to follow.
+        val imm = mockk<InputMethodManager>(relaxed = true)
+        val view = makeView(imm).apply { allowStandardKeyboard = true }
+        val ic = view.ic()
+
+        ic.commitText("teh ", 1)
+        ic.setComposingRegion(0, 3)
+        ic.commitText("the", 1)
+
+        // 1. "teh " committed: selection at 4.
+        verify { imm.updateSelection(view, 4, 4, -1, -1) }
+        // 2. composing region 0..3, selection still 4.
+        verify { imm.updateSelection(view, 4, 4, 0, 3) }
+        // 3. Replacement committed: editable "the ", selection at 3.
+        verify { imm.updateSelection(view, 3, 3, -1, -1) }
+    }
+
+    @Test
+    fun testDeleteSurroundingTextInStandardModeNotifiesUpdateSelection() {
+        val imm = mockk<InputMethodManager>(relaxed = true)
+        val view = makeView(imm).apply { allowStandardKeyboard = true }
+        val ic = view.ic()
+
+        ic.commitText("abc", 1)
+        ic.deleteSurroundingText(1, 0)
+
+        // "abc" → "ab", selection at 2.
+        verify { imm.updateSelection(view, 2, 2, -1, -1) }
+    }
+
     @Test
     fun testFinishComposingTextCancelsPendingReplacement() {
         // If the IME marks a region then finishes composition (without
