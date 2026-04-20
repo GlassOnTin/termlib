@@ -1,30 +1,11 @@
-import com.vanniktech.maven.publish.DeploymentValidation
-import org.jetbrains.dokka.gradle.formats.DokkaFormatPlugin
-import org.jetbrains.dokka.gradle.internal.InternalDokkaGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.android.library)
+    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     id("kotlin-parcelize")
-    alias(libs.plugins.publish)
-    alias(libs.plugins.metalava)
-    alias(libs.plugins.dokka)
 }
-
-@OptIn(InternalDokkaGradlePluginApi::class)
-abstract class DokkaMarkdownPlugin : DokkaFormatPlugin(formatName = "markdown") {
-    override fun DokkaFormatPlugin.DokkaFormatPluginContext.configure() {
-        project.dependencies {
-            dokkaPlugin(dokka("gfm-plugin"))
-            formatDependencies.dokkaPublicationPluginClasspathApiOnly.dependencies.addLater(
-                dokka("gfm-template-processing-plugin"),
-            )
-        }
-    }
-}
-
-apply<DokkaMarkdownPlugin>()
 
 val hostJniDir = layout.buildDirectory.dir("host-jni")
 val cppSourceDir = layout.projectDirectory.dir("src/main/cpp")
@@ -159,61 +140,3 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
 
-val gitHubUrl = "https://github.com/connectbot/termlib"
-
-metalava {
-    additionalSourceSets.from(file("src/main/java"))
-}
-
-dokka {
-    moduleName.set("ConnectBot Terminal")
-
-    dokkaSourceSets.configureEach {
-        sourceLink {
-            includes.from("README.md")
-            localDirectory.set(file("./"))
-            remoteUrl.set(uri("$gitHubUrl/blob/main"))
-            remoteLineSuffix.set("#L")
-        }
-    }
-
-    pluginsConfiguration {
-        html {
-            footerMessage.set("Copyright Kenny Root")
-            templatesDir.set(file("dokka/templates"))
-        }
-    }
-}
-
-mavenPublishing {
-    publishToMavenCentral(automaticRelease = true, validateDeployment = DeploymentValidation.PUBLISHED)
-    signAllPublications()
-
-    coordinates(groupId = "org.connectbot", artifactId = "termlib")
-
-    pom {
-        name.set("termlib")
-        description.set("ConnectBot's terminal emulator Android Compose component using libvterm")
-        inceptionYear.set("2025")
-        url.set(gitHubUrl)
-        licenses {
-            license {
-                name.set("The Apache License, Version 2.0")
-                url.set("http://www.apache.org/licenses/LICENSE-2.0.txt")
-                distribution.set("http://www.apache.org/licenses/LICENSE-2.0.txt")
-            }
-        }
-        developers {
-            developer {
-                id.set("kruton")
-                name.set("Kenny Root")
-                url.set("https://github.com/kruton/")
-            }
-        }
-        scm {
-            connection.set("scm:git:$gitHubUrl.git")
-            developerConnection.set("$gitHubUrl.git")
-            url.set(gitHubUrl)
-        }
-    }
-}
