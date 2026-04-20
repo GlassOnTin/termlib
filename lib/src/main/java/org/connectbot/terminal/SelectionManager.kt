@@ -335,11 +335,26 @@ internal class SelectionManager {
         }
     }
 
-    private fun getSnapshotLine(snapshot: TerminalSnapshot, row: Int, scrollbackPosition: Int = 0): TerminalLine? = if (scrollbackPosition > 0) {
-        val scrollbackIndex = snapshot.scrollback.size - scrollbackPosition + row
-        snapshot.scrollback.getOrNull(scrollbackIndex)
-    } else {
-        snapshot.lines.getOrNull(row)
+    /**
+     * Resolves a viewport-relative `row` (i.e., the row coordinate emitted by
+     * the gesture handler at tap-time) to the underlying [TerminalLine].
+     *
+     * For a viewport of `snapshot.rows` height scrolled back by
+     * `scrollbackPosition` lines, visible rows [0, scrollbackPosition) show
+     * scrollback, and visible rows [scrollbackPosition, rows) show the top
+     * portion of the current screen. The old implementation assumed any row
+     * when scrolled back came from scrollback — which silently returned null
+     * for rows that mapped to the current screen, breaking word-boundary
+     * expansion and text extraction on those rows.
+     */
+    private fun getSnapshotLine(snapshot: TerminalSnapshot, row: Int, scrollbackPosition: Int = 0): TerminalLine? {
+        if (scrollbackPosition <= 0) return snapshot.lines.getOrNull(row)
+        val actualIndex = snapshot.scrollback.size - scrollbackPosition + row
+        return if (actualIndex < snapshot.scrollback.size) {
+            snapshot.scrollback.getOrNull(actualIndex)
+        } else {
+            snapshot.lines.getOrNull(actualIndex - snapshot.scrollback.size)
+        }
     }
 
     private fun isWordChar(char: Char): Boolean = char.isLetterOrDigit() || char == '_'
@@ -391,15 +406,11 @@ internal class SelectionManager {
 
         return buildString {
             for (row in minRow..maxRow) {
-                // Get line from the appropriate source based on scrollback position
-                val line = if (scrollbackPosition > 0) {
-                    // Viewing scrollback: get from scrollback (stored newest-first, so reverse index)
-                    val scrollbackIndex = snapshot.scrollback.size - scrollbackPosition + row
-                    snapshot.scrollback.getOrNull(scrollbackIndex)
-                } else {
-                    // Viewing current screen: get from visible lines
-                    snapshot.lines.getOrNull(row)
-                }
+                // Viewport-relative `row` — use the same scrollback-aware
+                // resolver as [adjustSelectionForMode]. Visible rows above
+                // `scrollbackPosition` come from scrollback; the rest from
+                // the current screen.
+                val line = getSnapshotLine(snapshot, row, scrollbackPosition)
 
                 if (line == null) continue
 

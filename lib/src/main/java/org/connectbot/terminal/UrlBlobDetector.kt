@@ -52,8 +52,16 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
     private val rows = snapshot.rows
     private val cols = snapshot.cols
 
+    // Sources cells from getVisibleLine() rather than snapshot.lines[] so
+    // the row indices we work with match the tap coordinates passed in by
+    // the gesture handler — which are viewport-relative. When the user has
+    // scrolled back, `tapRow = 5` means "the 6th row currently on screen",
+    // which corresponds to a different underlying row depending on
+    // scrollbackPosition; TerminalScreenState.getVisibleLine does that
+    // translation for us.
     private val cellChar = Array(rows) { r ->
-        CharArray(cols) { c -> snapshot.lines.getOrNull(r)?.cells?.getOrNull(c)?.char ?: ' ' }
+        val line = state.getVisibleLine(r)
+        CharArray(cols) { c -> line.cells.getOrNull(c)?.char ?: ' ' }
     }
 
     private val structural: Array<BooleanArray> by lazy { computeStructural() }
