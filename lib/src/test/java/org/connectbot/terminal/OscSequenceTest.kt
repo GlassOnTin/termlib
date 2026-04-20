@@ -17,6 +17,7 @@
 package org.connectbot.terminal
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -26,6 +27,12 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class OscSequenceTest {
+    private fun getSnapshot(impl: TerminalEmulatorImpl): TerminalSnapshot {
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        impl.processPendingUpdates()
+        return impl.snapshot.value
+    }
+
     @Test
     fun testOscSequenceCallback() = runBlocking {
         var receivedCommand = -1
@@ -34,7 +41,7 @@ class OscSequenceTest {
 
         val emulator = TerminalEmulatorFactory.create(
             initialRows = 24,
-            initialCols = 80
+            initialCols = 80,
         )
 
         // Access the internal implementation to verify callback
@@ -57,7 +64,7 @@ class OscSequenceTest {
     fun testOscSequenceWithPayload() = runBlocking {
         val emulator = TerminalEmulatorFactory.create(
             initialRows = 24,
-            initialCols = 80
+            initialCols = 80,
         )
 
         // OSC 1337 with annotation
@@ -75,15 +82,15 @@ class OscSequenceTest {
     fun testMultipleOscSequences() = runBlocking {
         val emulator = TerminalEmulatorFactory.create(
             initialRows = 24,
-            initialCols = 80
+            initialCols = 80,
         )
 
         // Send multiple OSC sequences in sequence
         val sequences = listOf(
-            "\u001B]133;A\u001B\\",  // Prompt start
-            "\u001B]133;B\u001B\\",  // Command input start
-            "\u001B]133;C\u001B\\",  // Command output start
-            "\u001B]133;D;0\u001B\\" // Command finished with exit code 0
+            "\u001B]133;A\u001B\\", // Prompt start
+            "\u001B]133;B\u001B\\", // Command input start
+            "\u001B]133;C\u001B\\", // Command output start
+            "\u001B]133;D;0\u001B\\", // Command finished with exit code 0
         )
 
         for (seq in sequences) {
@@ -98,7 +105,7 @@ class OscSequenceTest {
     fun testOscSequenceWithMixedContent() = runBlocking {
         val emulator = TerminalEmulatorFactory.create(
             initialRows = 24,
-            initialCols = 80
+            initialCols = 80,
         )
 
         // Mix normal text with OSC sequences
@@ -119,7 +126,7 @@ class OscSequenceTest {
     fun testInvalidOscSequence() = runBlocking {
         val emulator = TerminalEmulatorFactory.create(
             initialRows = 24,
-            initialCols = 80
+            initialCols = 80,
         )
 
         // Send invalid OSC sequence (should be handled gracefully)
@@ -135,7 +142,7 @@ class OscSequenceTest {
     fun testOscSequencePartialData() = runBlocking {
         val emulator = TerminalEmulatorFactory.create(
             initialRows = 24,
-            initialCols = 80
+            initialCols = 80,
         )
 
         // Send OSC in parts (simulating slow data arrival)
@@ -154,7 +161,7 @@ class OscSequenceTest {
     fun testOsc8HyperlinkBasic() = runBlocking {
         val emulator = TerminalEmulatorFactory.create(
             initialRows = 24,
-            initialCols = 80
+            initialCols = 80,
         )
 
         // Send OSC 8 hyperlink sequence with text
@@ -162,11 +169,8 @@ class OscSequenceTest {
         val hyperlinkSequence = "\u001B]8;;https://example.com\u001B\\Click here\u001B]8;;\u001B\\".toByteArray()
         emulator.writeInput(hyperlinkSequence)
 
-        delay(100)
-
-        // Verify terminal renders the text without crashing
         val impl = emulator as TerminalEmulatorImpl
-        val snapshot = impl.snapshot.value
+        val snapshot = getSnapshot(impl)
         assertTrue(snapshot.lines.isNotEmpty())
 
         // Verify the text content is rendered
@@ -179,7 +183,7 @@ class OscSequenceTest {
     fun testOsc8HyperlinkWithId() = runBlocking {
         val emulator = TerminalEmulatorFactory.create(
             initialRows = 24,
-            initialCols = 80
+            initialCols = 80,
         )
 
         // Send OSC 8 hyperlink with id parameter
@@ -198,21 +202,18 @@ class OscSequenceTest {
     fun testOsc8MultipleHyperlinks() = runBlocking {
         val emulator = TerminalEmulatorFactory.create(
             initialRows = 24,
-            initialCols = 80
+            initialCols = 80,
         )
 
         // Send multiple hyperlinks on same line
         val sequence = (
             "\u001B]8;;https://first.com\u001B\\First\u001B]8;;\u001B\\ " +
-            "\u001B]8;;https://second.com\u001B\\Second\u001B]8;;\u001B\\"
-        ).toByteArray()
+                "\u001B]8;;https://second.com\u001B\\Second\u001B]8;;\u001B\\"
+            ).toByteArray()
         emulator.writeInput(sequence)
 
-        delay(100)
-
-        // Verify no crash and text is rendered
         val impl = emulator as TerminalEmulatorImpl
-        val snapshot = impl.snapshot.value
+        val snapshot = getSnapshot(impl)
         assertTrue(snapshot.lines.isNotEmpty())
 
         val line = snapshot.lines[0]
@@ -224,17 +225,15 @@ class OscSequenceTest {
     fun testOsc8HyperlinkWithMixedContent() = runBlocking {
         val emulator = TerminalEmulatorFactory.create(
             initialRows = 24,
-            initialCols = 80
+            initialCols = 80,
         )
 
         // Mix hyperlink with regular text
         val mixedContent = "Hello \u001B]8;;https://example.com\u001B\\World\u001B]8;;\u001B\\ today".toByteArray()
         emulator.writeInput(mixedContent)
 
-        delay(100)
-
         val impl = emulator as TerminalEmulatorImpl
-        val snapshot = impl.snapshot.value
+        val snapshot = getSnapshot(impl)
 
         // Verify text is rendered correctly
         assertTrue(snapshot.lines.isNotEmpty())
@@ -247,22 +246,20 @@ class OscSequenceTest {
     fun testOsc8HyperlinkAccessibility() = runBlocking {
         val emulator = TerminalEmulatorFactory.create(
             initialRows = 24,
-            initialCols = 80
+            initialCols = 80,
         )
 
         // Test that hyperlink text is rendered (URL should not appear in visible text)
         val sequence = "\u001B]8;;https://github.com/connectbot\u001B\\ConnectBot Project\u001B]8;;\u001B\\".toByteArray()
         emulator.writeInput(sequence)
 
-        delay(100)
-
         val impl = emulator as TerminalEmulatorImpl
-        val snapshot = impl.snapshot.value
+        val snapshot = getSnapshot(impl)
         assertTrue(snapshot.lines.isNotEmpty())
 
         // The visible text should be the link text, not the URL
         val line = snapshot.lines[0]
         val text = line.cells.take(17).map { it.char }.joinToString("")
-        assertEquals("ConnectBot Projec", text)  // First 17 chars of "ConnectBot Project"
+        assertEquals("ConnectBot Projec", text) // First 17 chars of "ConnectBot Project"
     }
 }

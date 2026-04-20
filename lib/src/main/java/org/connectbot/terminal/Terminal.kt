@@ -16,6 +16,8 @@
  */
 package org.connectbot.terminal
 
+import android.app.Activity
+import android.content.Intent
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Typeface
@@ -39,6 +41,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -51,6 +55,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -62,6 +67,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.Key
@@ -69,25 +76,36 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.ceil
 
 /**
  * Gesture type for unified gesture handling state machine.
@@ -97,7 +115,7 @@ private enum class GestureType {
     Scroll,
     Selection,
     Zoom,
-    HandleDrag
+    HandleDrag,
 }
 
 /**
@@ -195,20 +213,24 @@ private val COPY_BUTTON_SIZE = 48.dp
 private val COPY_BUTTON_OFFSET = 48.dp
 
 /**
- * Background color for selected text (blue highlight).
- */
-private val SELECTION_HIGHLIGHT_COLOR = Color(0xFF4A90E2)
-
-/**
  * Touch radius in pixels for detecting selection handle touches.
  */
 private const val HANDLE_HIT_RADIUS = 80f
 
 /**
- * Vertical offset in dp to position the magnifier above the finger.
+ * Vertical offset in dp to position the magnifier above (or below) the finger.
  */
 private val MAGNIFIER_VERTICAL_OFFSET = 40.dp
 
+/**
+ * Estimated finger contact height in dp, used to avoid positioning the magnifier under the finger.
+ */
+private val FINGER_HEIGHT_DP = 50.dp
+
+/**
+ * Center offset multiplier for magnifier positioning.
+ */
+private const val MAGNIFIER_CENTER_OFFSET_MULTIPLIER = 1.2f
 
 /**
  * Border width for the magnifier loupe in dp.
@@ -297,6 +319,8 @@ private const val DOUBLE_UNDERLINE_SPACING = 2f
  * @param forcedSize Force terminal to specific dimensions (rows, cols). When set, font size is calculated to fit.
  * @param onSelectionControllerAvailable Optional callback providing access to the SelectionController for controlling selection mode
  * @param onHyperlinkClick Callback when user taps on an OSC8 hyperlink. Receives the URL as parameter.
+ * @param selectionBackgroundColor Background color for selected text (default: 0xFFB3D7FF)
+ * @param selectionForegroundColor Foreground color for selected text (default: Black)
  */
 @Composable
 fun Terminal(
@@ -308,6 +332,8 @@ fun Terminal(
     maxFontSize: TextUnit = 30.sp,
     backgroundColor: Color = Color.Black,
     foregroundColor: Color = Color.White,
+    selectionBackgroundColor: Color = Color(0xFFB3D7FF),
+    selectionForegroundColor: Color = Color.Black,
     keyboardEnabled: Boolean = false,
     showSoftKeyboard: Boolean = true,
     focusRequester: FocusRequester = remember { FocusRequester() },
@@ -324,7 +350,15 @@ fun Terminal(
     allowStandardKeyboard: Boolean = false,
     rawKeyboardMode: Boolean = false,
     onPasteShortcut: (() -> Unit)? = null,
+    onPasteRequest: (() -> Unit)? = null,
+    rightAltMode: RightAltMode = RightAltMode.CharacterModifier,
+    delKeyMode: DelKeyMode = DelKeyMode.Delete,
 ) {
+    if (LocalInspectionMode.current) {
+        TerminalPreview(modifier, backgroundColor, foregroundColor)
+        return
+    }
+
     TerminalWithAccessibility(
         terminalEmulator = terminalEmulator,
         modifier = modifier,
@@ -350,6 +384,12 @@ fun Terminal(
         allowStandardKeyboard = allowStandardKeyboard,
         rawKeyboardMode = rawKeyboardMode,
         onPasteShortcut = onPasteShortcut,
+        onScrollControllerAvailable = null,
+        onPasteRequest = onPasteRequest,
+        rightAltMode = rightAltMode,
+        selectionBackgroundColor = selectionBackgroundColor,
+        selectionForegroundColor = selectionForegroundColor,
+        delKeyMode = delKeyMode,
     )
 }
 
@@ -360,7 +400,7 @@ fun Terminal(
  */
 @VisibleForTesting
 @Composable
-fun TerminalWithAccessibility(
+internal fun TerminalWithAccessibility(
     terminalEmulator: TerminalEmulator,
     modifier: Modifier = Modifier,
     typeface: Typeface = Typeface.MONOSPACE,
@@ -386,10 +426,16 @@ fun TerminalWithAccessibility(
     allowStandardKeyboard: Boolean = false,
     rawKeyboardMode: Boolean = false,
     onPasteShortcut: (() -> Unit)? = null,
+    onScrollControllerAvailable: ((ScrollController) -> Unit)? = null,
+    onPasteRequest: (() -> Unit)? = null,
+    rightAltMode: RightAltMode = RightAltMode.CharacterModifier,
+    selectionBackgroundColor: Color = Color(0xFFB3D7FF),
+    selectionForegroundColor: Color = Color.Black,
+    delKeyMode: DelKeyMode = DelKeyMode.Delete,
 ) {
     if (terminalEmulator !is TerminalEmulatorImpl) {
         Box(
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier.fillMaxSize(),
         ) {
             Text("Unknown TerminalEmulator type")
         }
@@ -398,9 +444,14 @@ fun TerminalWithAccessibility(
 
     val terminalEmulator: TerminalEmulatorImpl = terminalEmulator
 
+    // Remember updated callbacks to avoid stale lambdas inside pointerInput
+    val currentOnTerminalTap by rememberUpdatedState(onTerminalTap)
+    val currentOnHyperlinkClick by rememberUpdatedState(onHyperlinkClick)
+
     val density = LocalDensity.current
     val clipboardManager = LocalClipboardManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    val scope = rememberCoroutineScope()
 
     // Track accessibility state - only enable accessibility features when needed
     val systemAccessibilityEnabled by rememberAccessibilityState()
@@ -413,6 +464,8 @@ fun TerminalWithAccessibility(
     val keyboardHandler = remember(terminalEmulator) {
         KeyboardHandler(terminalEmulator, modifierManager)
     }
+    keyboardHandler.rightAltMode = rightAltMode
+    keyboardHandler.delKeyMode = delKeyMode
 
     // Re-bind the paste shortcut callback whenever the host swaps it
     // (e.g. when the user toggles the preference). Reading null here
@@ -514,7 +567,7 @@ fun TerminalWithAccessibility(
         screenState.snapshot.cursorVisible,
         screenState.snapshot.cursorBlink,
         screenState.snapshot.cursorRow,
-        screenState.snapshot.cursorCol
+        screenState.snapshot.cursorCol,
     ) {
         if (screenState.snapshot.cursorVisible) {
             cursorBlinkVisible = true
@@ -544,19 +597,25 @@ fun TerminalWithAccessibility(
         textPaint.measureText("M")
     }
 
+    // Snap to integer pixels so adjacent rows share a pixel boundary; otherwise
+    // fractional row pitch leaves a gap between background rects (issue #2069).
     val baseCharHeight = remember(textPaint) {
         val metrics = textPaint.fontMetrics
-        metrics.descent - metrics.ascent
+        val height = ceil(metrics.descent - metrics.ascent)
+        if (height <= 0f) 20f else height // Fallback for tests
     }
 
     val baseCharBaseline = remember(textPaint) {
-        -textPaint.fontMetrics.ascent
+        ceil(-textPaint.fontMetrics.ascent)
     }
 
     // Scroll animation state
     val scrollOffset = remember(terminalEmulator) { Animatable(0f) }
     val maxScroll = remember(screenState.snapshot.scrollback.size, baseCharHeight) {
         screenState.snapshot.scrollback.size * baseCharHeight
+    }
+    LaunchedEffect(maxScroll) {
+        scrollOffset.updateBounds(0f, maxScroll)
     }
 
     // Selection manager
@@ -575,7 +634,7 @@ fun TerminalWithAccessibility(
                     // Start at cursor position or center of screen
                     val row = screenState.snapshot.cursorRow.coerceIn(0, screenState.snapshot.rows - 1)
                     val col = screenState.snapshot.cursorCol.coerceIn(0, screenState.snapshot.cols - 1)
-                    selectionManager.startSelection(row, col, mode)
+                    selectionManager.startSelection(row, col, screenState.snapshot.cols, mode, screenState.snapshot, screenState.scrollbackPosition)
                 }
             }
 
@@ -604,7 +663,15 @@ fun TerminalWithAccessibility(
             }
 
             override fun toggleSelectionMode() {
-                selectionManager.toggleMode(screenState.snapshot.cols)
+                selectionManager.toggleMode(screenState.snapshot.cols, screenState.snapshot, screenState.scrollbackPosition)
+            }
+
+            override fun setSelectionMode(mode: SelectionMode) {
+                selectionManager.setMode(mode, screenState.snapshot.cols, screenState.snapshot, screenState.scrollbackPosition)
+            }
+
+            override fun selectAll() {
+                selectionManager.selectAll(screenState.snapshot.rows, screenState.snapshot.cols)
             }
 
             override fun finishSelection() {
@@ -666,9 +733,10 @@ fun TerminalWithAccessibility(
                 }
             }
 
-            override fun getComposedText(): String {
-                return composeMode.buffer
-            }
+            override fun getComposedText(): String = composeMode.buffer
+
+            override val pendingDeadChar: Int
+                get() = keyboardHandler.pendingDeadChar
         }
     }
 
@@ -688,6 +756,45 @@ fun TerminalWithAccessibility(
         onComposeControllerAvailable?.invoke(composeController)
     }
 
+    // Scroll controller implementation
+    val scrollController = remember(screenState, scrollOffset, scope, maxScroll) {
+        object : ScrollController {
+            override val scrollbackPosition: Int
+                get() = screenState.scrollbackPosition
+
+            override val maxScrollback: Int
+                get() = screenState.snapshot.scrollback.size
+
+            override fun scrollToBottom() {
+                screenState.scrollToBottom()
+                scope.launch {
+                    scrollOffset.snapTo(0f)
+                }
+            }
+
+            override fun scrollToTop() {
+                screenState.scrollToTop()
+                scope.launch {
+                    scrollOffset.snapTo(maxScroll)
+                }
+            }
+
+            override fun scrollBy(lines: Int) {
+                val newPosition = (screenState.scrollbackPosition + lines)
+                    .coerceIn(0, maxScrollback)
+                screenState.scrollBy(newPosition - screenState.scrollbackPosition)
+                scope.launch {
+                    scrollOffset.snapTo(newPosition * baseCharHeight)
+                }
+            }
+        }
+    }
+
+    // Provide scroll controller to caller
+    LaunchedEffect(scrollController) {
+        onScrollControllerAvailable?.invoke(scrollController)
+    }
+
     // Sync compose mode active state to ImeInputView so onCreateInputConnection returns the
     // correct outAttrs (and restartInput is called to apply the change).
     LaunchedEffect(composeMode.isActive, imeInputView) {
@@ -696,6 +803,15 @@ fun TerminalWithAccessibility(
 
     // Coroutine scope for animations
     val coroutineScope = rememberCoroutineScope()
+
+    // Last tap tracking for double-tap detection.
+    // Stored as plain vars in a remembered holder so writes don't trigger recomposition.
+    val tapTracker = remember(terminalEmulator) {
+        object {
+            var lastTimestamp = 0L
+            var lastPosition = Offset.Zero
+        }
+    }
 
     // Setup keyboard input callback to reset scroll position
     LaunchedEffect(screenState, scrollOffset) {
@@ -732,7 +848,10 @@ fun TerminalWithAccessibility(
                                     Key.DirectionLeft,
                                     Key.DirectionRight,
                                     Key.PageUp,
-                                    Key.PageDown -> false // Don't consume - let system handle
+                                    Key.PageDown,
+                                    -> false
+
+                                    // Don't consume - let system handle
                                     else -> {
                                         // Any other key exits Review Mode and goes to shell
                                         isReviewMode = false
@@ -746,10 +865,9 @@ fun TerminalWithAccessibility(
                         }
                 } else {
                     Modifier
-                }
-            )
+                },
+            ),
     ) {
-
         // Calculate font size if forcedSize is specified
         if (forcedSize != null) {
             val (forcedRows, forcedCols) = forcedSize
@@ -766,7 +884,7 @@ fun TerminalWithAccessibility(
                     minSize = minFontSize.value,
                     maxSize = maxFontSize.value,
                     typeface = typeface,
-                    density = density.density
+                    density = density.density,
                 )
                 calculatedFontSize = optimalSize.sp
             }
@@ -785,7 +903,7 @@ fun TerminalWithAccessibility(
 
         // Resize terminal when dimensions change
         LaunchedEffect(terminalEmulator, availableWidth, availableHeight, forcedSize, baseCharWidth, baseCharHeight) {
-            if (availableWidth == 0 || availableHeight == 0) {
+            if (availableWidth == 0 || availableHeight == 0 || baseCharWidth <= 0f || baseCharHeight <= 0f) {
                 return@LaunchedEffect
             }
 
@@ -798,6 +916,13 @@ fun TerminalWithAccessibility(
             val dimensions = terminalEmulator.dimensions
             if (newRows != dimensions.rows || newCols != dimensions.columns) {
                 terminalEmulator.resize(newRows, newCols)
+
+                // If selection is active, ensure it stays within the new visible bounds.
+                // This ensures the Copy button resets to the last visible line when the screen
+                // shrinks (e.g. keyboard up) without forcing a scroll to the bottom.
+                if (selectionManager.mode != SelectionMode.NONE) {
+                    selectionManager.clampToDimensions(newRows, newCols)
+                }
             }
         }
 
@@ -873,20 +998,23 @@ fun TerminalWithAccessibility(
                         val inPinchCooldown = sincePinch < MULTITOUCH_LIFTOFF_MS
 
                         // 1. Check if touching a selection handle first
-                        if (selectionManager.mode != SelectionMode.NONE && !selectionManager.isSelecting) {
+                        if (gestureType == GestureType.Undetermined && selectionManager.mode != SelectionMode.NONE && !selectionManager.isSelecting) {
                             val range = selectionManager.selectionRange
                             if (range != null) {
                                 val (touchingStart, touchingEnd) = isTouchingHandle(
                                     down.position,
                                     range,
                                     baseCharWidth,
-                                    baseCharHeight
+                                    baseCharHeight,
                                 )
                                 if (touchingStart || touchingEnd) {
                                     gestureType = GestureType.HandleDrag
                                     // Handle drag
                                     showMagnifier = true
                                     magnifierPosition = down.position
+
+                                    // Local variable to keep track of which handle we are moving in case they cross
+                                    var isMovingStart = touchingStart
 
                                     drag(down.id) { change ->
                                         val newCol =
@@ -896,21 +1024,38 @@ fun TerminalWithAccessibility(
                                             (change.position.y / baseCharHeight).toInt()
                                                 .coerceIn(0, screenState.snapshot.rows - 1)
 
-                                        if (touchingStart) {
-                                            selectionManager.updateSelectionStart(
-                                                newRow,
-                                                newCol
+                                        val current = selectionManager.selectionRange
+                                        if (current != null) {
+                                            val result = applyHandleDrag(
+                                                startRow = current.startRow,
+                                                startCol = current.startCol,
+                                                endRow = current.endRow,
+                                                endCol = current.endCol,
+                                                isMovingStart = isMovingStart,
+                                                newRow = newRow,
+                                                newCol = newCol,
                                             )
-                                        } else {
-                                            selectionManager.updateSelectionEnd(
-                                                newRow,
-                                                newCol
+                                            isMovingStart = result.isMovingStart
+                                            selectionManager.updateSelectionStart(result.startRow, result.startCol)
+                                            selectionManager.updateSelectionEnd(result.endRow, result.endCol)
+                                            selectionManager.adjustSelectionForMode(
+                                                screenState.snapshot.cols,
+                                                screenState.snapshot,
+                                                screenState.scrollbackPosition,
                                             )
                                         }
 
                                         magnifierPosition = change.position
                                         change.consume()
                                     }
+
+                                    // After lifting finger, ensure selection is fully adjusted and handles snap
+                                    selectionManager.adjustSelectionForMode(
+                                        screenState.snapshot.cols,
+                                        screenState.snapshot,
+                                        screenState.scrollbackPosition,
+                                    )
+
                                     showMagnifier = false
                                     // Don't auto-show menu again after dragging handle
                                     return@awaitEachGesture
@@ -960,7 +1105,8 @@ fun TerminalWithAccessibility(
                                 selectionManager.startSelection(
                                     row,
                                     col,
-                                    SelectionMode.BLOCK
+                                    screenState.snapshot.cols,
+                                    SelectionMode.CHARACTER,
                                 )
                                 showMagnifier = true
                                 magnifierPosition = down.position
@@ -1248,25 +1394,28 @@ fun TerminalWithAccessibility(
                                         }
                                     }
                                 }
+                                // Record tap for double-tap detection
+                                tapTracker.lastTimestamp = down.uptimeMillis
+                                tapTracker.lastPosition = down.position
                             }
 
                             else -> {}
                         }
                     }
                 }
-            }
+            },
         ) {
             Canvas(
                 modifier = Modifier
                     .fillMaxSize()
                     .clearAndSetSemantics {
                         // Hide Canvas from accessibility tree - AccessibilityOverlay provides semantic structure
-                    }
+                    },
             ) {
                 // Fill background
                 drawRect(
                     color = backgroundColor,
-                    size = size
+                    size = size,
                 )
 
                 // Precompute which rows are part of a multi-line URL group.
@@ -1321,7 +1470,10 @@ fun TerminalWithAccessibility(
                         textPaint = textPaint,
                         defaultFg = foregroundColor,
                         defaultBg = backgroundColor,
-                        selectionManager = selectionManager
+                        selectionManager = selectionManager,
+                        autoDetectUrls = terminalEmulator.autoDetectUrls,
+                        selectionBackgroundColor = selectionBackgroundColor,
+                        selectionForegroundColor = selectionForegroundColor,
                     )
                 }
 
@@ -1333,7 +1485,11 @@ fun TerminalWithAccessibility(
                         charWidth = baseCharWidth,
                         charHeight = baseCharHeight,
                         foregroundColor = foregroundColor,
-                        cursorShape = screenState.snapshot.cursorShape
+                        backgroundColor = backgroundColor,
+                        cursorShape = screenState.snapshot.cursorShape,
+                        pendingDeadChar = composeController.pendingDeadChar,
+                        charBaseline = baseCharBaseline,
+                        textPaint = textPaint,
                     )
                 }
 
@@ -1347,7 +1503,7 @@ fun TerminalWithAccessibility(
                         charWidth = baseCharWidth,
                         charHeight = baseCharHeight,
                         charBaseline = baseCharBaseline,
-                        textPaint = textPaint
+                        textPaint = textPaint,
                     )
                 }
 
@@ -1403,14 +1559,14 @@ fun TerminalWithAccessibility(
                         .focusRequester(reviewFocusRequester)
                         .focusable(),
                     onToggleReviewMode = { isReviewMode = !isReviewMode },
-                    isReviewMode = isReviewMode
+                    isReviewMode = isReviewMode,
                 )
 
                 if (!isReviewMode && keyboardEnabled) {
                     LiveOutputRegion(
                         screenState = screenState,
                         enabled = true,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
                     )
                 }
             }
@@ -1427,47 +1583,141 @@ fun TerminalWithAccessibility(
                 textPaint = textPaint,
                 backgroundColor = backgroundColor,
                 foregroundColor = foregroundColor,
-                selectionManager = selectionManager
+                selectionManager = selectionManager,
+                autoDetectUrls = terminalEmulator.autoDetectUrls,
+                componentWidth = availableWidth,
+                componentHeight = availableHeight,
+                selectionBackgroundColor = selectionBackgroundColor,
+                selectionForegroundColor = selectionForegroundColor,
             )
         }
 
-        // Action buttons when text is selected
+        // Copy button (+ overflow menu) when text is selected
         if (selectionManager.mode != SelectionMode.NONE && !selectionManager.isSelecting) {
             val range = selectionManager.selectionRange
             if (range != null) {
-                // Position buttons above the selection. Clamp both axes so
-                // the Row stays within the terminal's viewport — selections
-                // that end near the right edge (or on row 0) used to push
-                // the Copy/Paste buttons off-screen. See #98.
                 val endPosition = range.getEndPosition()
-                val rowWidthPx = with(density) {
-                    (COPY_BUTTON_SIZE * 2 + 4.dp).toPx()
-                }
-                val terminalWidthPx = screenState.snapshot.cols * baseCharWidth
-                val rawX = endPosition.second * baseCharWidth
-                val buttonX = rawX.coerceIn(0f, (terminalWidthPx - rowWidthPx).coerceAtLeast(0f))
+                val buttonRowWidthPx = with(density) { (COPY_BUTTON_SIZE * 2 + 8.dp).toPx() }
+                val buttonX = (endPosition.second * baseCharWidth)
+                    .coerceAtMost(availableWidth - buttonRowWidthPx)
+                    .coerceAtLeast(0f)
                 val buttonY = endPosition.first * baseCharHeight - with(density) { COPY_BUTTON_OFFSET.toPx() }
+                val context = LocalContext.current
+                var overflowMenuExpanded by remember { mutableStateOf(false) }
 
                 Row(
                     modifier = Modifier
                         .offset(
                             x = with(density) { buttonX.toDp() },
-                            y = with(density) { buttonY.coerceAtLeast(0f).toDp() }
+                            y = with(density) { buttonY.coerceAtLeast(0f).toDp() },
                         ),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    FloatingActionButton(
-                        onClick = {
-                            val selectedText =
-                                selectionManager.getSelectedText(screenState.snapshot, screenState.scrollbackPosition)
-                            clipboardManager.setText(AnnotatedString(selectedText))
-                            selectionManager.clearSelection()
-                        },
-                        modifier = Modifier.size(COPY_BUTTON_SIZE),
-                        containerColor = Color.White,
-                        contentColor = Color.Black
-                    ) {
-                        Text("Copy", style = MaterialTheme.typography.labelSmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FloatingActionButton(
+                            onClick = {
+                                val selectedText =
+                                    selectionManager.getSelectedText(screenState.snapshot, screenState.scrollbackPosition)
+                                clipboardManager.setText(AnnotatedString(selectedText))
+                                selectionManager.clearSelection()
+                            },
+                            modifier = Modifier.size(COPY_BUTTON_SIZE),
+                            containerColor = Color.White,
+                            contentColor = Color.Black,
+                        ) {
+                            Text(stringResource(R.string.terminal_selection_copy), style = MaterialTheme.typography.labelSmall)
+                        }
+
+                        Box {
+                            val moreOptionsLabel = stringResource(R.string.terminal_selection_more_options_description)
+                            FloatingActionButton(
+                                onClick = {
+                                    overflowMenuExpanded = true
+                                    if (shouldShowIme) {
+                                        scope.launch {
+                                            delay(IME_SHOW_DELAY_MS)
+                                            imeInputView?.showIme()
+                                        }
+                                    }
+                                },
+                                modifier = Modifier
+                                    .size(COPY_BUTTON_SIZE)
+                                    .semantics {
+                                        contentDescription = moreOptionsLabel
+                                        role = Role.Button
+                                    },
+                                containerColor = Color.White,
+                                contentColor = Color.Black,
+                            ) {
+                                Text(stringResource(R.string.terminal_selection_more_options), style = MaterialTheme.typography.labelSmall)
+                            }
+
+                            DropdownMenu(
+                                expanded = overflowMenuExpanded,
+                                onDismissRequest = {
+                                    overflowMenuExpanded = false
+                                    if (shouldShowIme) {
+                                        scope.launch {
+                                            delay(IME_SHOW_DELAY_MS)
+                                            imeInputView?.showIme()
+                                        }
+                                    }
+                                },
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.terminal_selection_select_all)) },
+                                    onClick = {
+                                        selectionController.selectAll()
+                                        overflowMenuExpanded = false
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.terminal_selection_share)) },
+                                    onClick = {
+                                        val selectedText = selectionManager.getSelectedText(
+                                            screenState.snapshot,
+                                            screenState.scrollbackPosition,
+                                        )
+                                        val intent = Intent(Intent.ACTION_SEND).apply {
+                                            type = "text/plain"
+                                            putExtra(Intent.EXTRA_TEXT, selectedText)
+                                            if (context !is Activity) {
+                                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            }
+                                        }
+                                        try {
+                                            context.startActivity(Intent.createChooser(intent, null))
+                                        } catch (_: android.content.ActivityNotFoundException) {
+                                            // No app available to handle the share intent; silently ignore
+                                        }
+                                        overflowMenuExpanded = false
+                                    },
+                                )
+                                if (onPasteRequest != null) {
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.terminal_selection_paste)) },
+                                        onClick = {
+                                            selectionManager.clearSelection()
+                                            onPasteRequest()
+                                            overflowMenuExpanded = false
+                                        },
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = {
+                                        val modeLabel = when (selectionManager.mode) {
+                                            SelectionMode.CHARACTER -> stringResource(R.string.terminal_selection_mode_character)
+                                            SelectionMode.WORD -> stringResource(R.string.terminal_selection_mode_word)
+                                            else -> stringResource(R.string.terminal_selection_mode_line)
+                                        }
+                                        Text(modeLabel)
+                                    },
+                                    onClick = {
+                                        selectionController.toggleSelectionMode()
+                                        // Keep menu open for easy cycling
+                                    },
+                                )
+                            }
+                        }
                     }
                     FloatingActionButton(
                         onClick = {
@@ -1502,7 +1752,7 @@ fun TerminalWithAccessibility(
                                 resetImeBuffer()
                             }
                             keyboardHandler.onKeyEvent(
-                                androidx.compose.ui.input.key.KeyEvent(event)
+                                androidx.compose.ui.input.key.KeyEvent(event),
                             )
                         }
                         // Store reference for IME control
@@ -1516,11 +1766,10 @@ fun TerminalWithAccessibility(
                 modifier = Modifier
                     .size(1.dp)
                     .focusable()
-                    .focusRequester(focusRequester)
+                    .focusRequester(focusRequester),
             )
         }
     }
-
 }
 
 /**
@@ -1537,7 +1786,10 @@ private fun DrawScope.drawLine(
     textPaint: TextPaint,
     defaultFg: Color,
     defaultBg: Color,
-    selectionManager: SelectionManager
+    selectionManager: SelectionManager,
+    autoDetectUrls: Boolean = false,
+    selectionBackgroundColor: Color = Color(0xFFB3D7FF),
+    selectionForegroundColor: Color = Color.Black,
 ) {
     val y = row * charHeight
     var x = 0f
@@ -1546,26 +1798,26 @@ private fun DrawScope.drawLine(
         val cellWidth = charWidth * cell.width
 
         // Check if this cell is selected
-        val isSelected = selectionManager.isCellSelected(row, col)
+        val isSelected = selectionManager.isCellSelected(row, col, line)
 
         // Check if this cell is part of a hyperlink.
         // For URL continuation rows, only underline the leading URL-safe
         // prefix (spaces are allowed at the left/right terminal margins
         // where wrapping occurs, but a mid-line space ends the URL).
-        val isHyperlink = line.getHyperlinkUrlAt(col) != null ||
+        val isHyperlink = line.getHyperlinkUrlAt(col, autoDetectUrls) != null ||
             (isUrlContinuation && col < urlContinuationEndCol)
 
         // Determine colors (handle reverse video and selection)
-        val fgColor = if (cell.reverse) cell.bgColor else cell.fgColor
+        val baseFgColor = if (cell.reverse) cell.bgColor else cell.fgColor
         val bgColor = if (cell.reverse) cell.fgColor else cell.bgColor
 
         // Draw background (with selection highlight)
-        val finalBgColor = if (isSelected) SELECTION_HIGHLIGHT_COLOR else bgColor
+        val finalBgColor = if (isSelected) selectionBackgroundColor else bgColor
         if (finalBgColor != defaultBg || isSelected) {
             drawRect(
                 color = finalBgColor,
                 topLeft = Offset(x, y),
-                size = Size(cellWidth, charHeight)
+                size = Size(cellWidth, charHeight),
             )
         }
 
@@ -1575,6 +1827,9 @@ private fun DrawScope.drawLine(
                 append(cell.char)
                 cell.combiningChars.forEach { append(it) }
             }
+
+            // Force high contrast for text on the selection background
+            val fgColor = if (isSelected) selectionForegroundColor else baseFgColor
 
             // Configure text paint for this cell
             textPaint.color = fgColor.toArgb()
@@ -1589,7 +1844,7 @@ private fun DrawScope.drawLine(
                 text,
                 x,
                 y + charBaseline,
-                textPaint
+                textPaint,
             )
 
             // Draw double underline if needed
@@ -1598,7 +1853,7 @@ private fun DrawScope.drawLine(
                     x = x,
                     y = y + charBaseline,
                     width = cellWidth,
-                    color = fgColor
+                    color = fgColor,
                 )
             }
 
@@ -1609,7 +1864,7 @@ private fun DrawScope.drawLine(
                     y = y + charBaseline,
                     width = cellWidth,
                     charWidth = charWidth,
-                    color = fgColor
+                    color = fgColor,
                 )
             }
         }
@@ -1630,7 +1885,7 @@ private fun DrawScope.drawDoubleUnderline(
     x: Float,
     y: Float,
     width: Float,
-    color: Color
+    color: Color,
 ) {
     val paint = Paint().apply {
         this.color = color.toArgb()
@@ -1665,7 +1920,7 @@ private fun DrawScope.drawCurlyUnderline(
     y: Float,
     width: Float,
     charWidth: Float,
-    color: Color
+    color: Color,
 ) {
     val path = Path()
     val wavelength = charWidth / CURLY_UNDERLINE_CYCLES_PER_CHAR
@@ -1701,8 +1956,79 @@ private fun DrawScope.drawCurlyUnderline(
             style = Paint.Style.STROKE
             strokeWidth = 1f
             isAntiAlias = true
-        }
+        },
     )
+}
+
+/**
+ * Result of a single handle-drag update step.
+ *
+ * @param startRow Updated selection start row
+ * @param startCol Updated selection start col
+ * @param endRow Updated selection end row
+ * @param endCol Updated selection end col
+ * @param isMovingStart Which handle the finger is now dragging after this step
+ */
+internal data class HandleDragResult(
+    val startRow: Int,
+    val startCol: Int,
+    val endRow: Int,
+    val endCol: Int,
+    val isMovingStart: Boolean,
+)
+
+/**
+ * Computes the next selection range and active-handle flag for one drag event, handling
+ * the case where the two handles cross each other.
+ *
+ * When the moving handle passes the anchor, ownership flips and the anchor is restored to
+ * its pre-cross position so it doesn't jump to the dragged handle's column.
+ *
+ * @param startRow Current selection start row (before this event)
+ * @param startCol Current selection start col (before this event)
+ * @param endRow Current selection end row (before this event)
+ * @param endCol Current selection end col (before this event)
+ * @param isMovingStart True if the start handle is being dragged
+ * @param newRow Row the finger moved to
+ * @param newCol Col the finger moved to
+ */
+@VisibleForTesting
+internal fun applyHandleDrag(
+    startRow: Int,
+    startCol: Int,
+    endRow: Int,
+    endCol: Int,
+    isMovingStart: Boolean,
+    newRow: Int,
+    newCol: Int,
+): HandleDragResult {
+    val anchorRow = if (isMovingStart) endRow else startRow
+    val anchorCol = if (isMovingStart) endCol else startCol
+
+    val updatedStartRow = if (isMovingStart) newRow else startRow
+    val updatedStartCol = if (isMovingStart) newCol else startCol
+    val updatedEndRow = if (isMovingStart) endRow else newRow
+    val updatedEndCol = if (isMovingStart) endCol else newCol
+
+    val crossed = if (isMovingStart) {
+        newRow > anchorRow || (newRow == anchorRow && newCol > anchorCol)
+    } else {
+        newRow < anchorRow || (newRow == anchorRow && newCol < anchorCol)
+    }
+
+    return if (!crossed) {
+        HandleDragResult(updatedStartRow, updatedStartCol, updatedEndRow, updatedEndCol, isMovingStart)
+    } else {
+        // Flip ownership and restore the stationary handle to its pre-cross position.
+        val newIsMovingStart = !isMovingStart
+        if (newIsMovingStart) {
+            // Was moving end, now moving start — end goes back to anchor
+            HandleDragResult(newRow, newCol, anchorRow, anchorCol, newIsMovingStart)
+        } else {
+            // Was moving start, now moving end — start goes back to anchor
+            HandleDragResult(anchorRow, anchorCol, newRow, newCol, newIsMovingStart)
+        }
+    }
 }
 
 /**
@@ -1714,7 +2040,7 @@ private fun isTouchingHandle(
     range: SelectionRange,
     charWidth: Float,
     charHeight: Float,
-    hitRadius: Float = HANDLE_HIT_RADIUS
+    hitRadius: Float = HANDLE_HIT_RADIUS,
 ): Pair<Boolean, Boolean> {
     // Handle circles are drawn offset from the character edge by their radius (~12dp).
     // Start handle points up (circle above the character top),
@@ -1723,11 +2049,11 @@ private fun isTouchingHandle(
     val handleRadius = charHeight * 0.4f // approximate circle radius
     val startPos = Offset(
         range.startCol * charWidth + charWidth / 2,
-        range.startRow * charHeight - handleRadius
+        range.startRow * charHeight - handleRadius,
     )
     val endPos = Offset(
         range.endCol * charWidth + charWidth / 2,
-        range.endRow * charHeight + charHeight + handleRadius
+        range.endRow * charHeight + charHeight + handleRadius,
     )
 
     val distToStart = (touchPos - startPos).getDistance()
@@ -1735,8 +2061,77 @@ private fun isTouchingHandle(
 
     return Pair(
         distToStart < hitRadius,
-        distToEnd < hitRadius
+        distToEnd < hitRadius,
     )
+}
+
+/**
+ * Lightweight placeholder shown when the Terminal composable is rendered
+ * inside Android Studio's Compose Preview (LocalInspectionMode).
+ */
+@Composable
+private fun TerminalPreview(
+    modifier: Modifier = Modifier,
+    backgroundColor: Color = Color.Black,
+    foregroundColor: Color = Color.White,
+) {
+    val previewLines = listOf(
+        "$ echo hello",
+        "hello",
+        "$ _",
+    )
+
+    Canvas(
+        modifier = modifier
+            .fillMaxSize()
+            .background(backgroundColor),
+    ) {
+        val textPaint = TextPaint().apply {
+            color = foregroundColor.toArgb()
+            typeface = Typeface.MONOSPACE
+            textSize = 14f * density
+        }
+        val metrics = textPaint.fontMetrics
+        val lineHeight = ceil(metrics.descent - metrics.ascent)
+        val baseline = ceil(-metrics.ascent)
+
+        previewLines.forEachIndexed { index, line ->
+            drawContext.canvas.nativeCanvas.drawText(
+                line,
+                0f,
+                baseline + index * lineHeight,
+                textPaint,
+            )
+        }
+    }
+}
+
+/**
+ * Calculates the top-left offset for the magnifying glass box so it stays visible and
+ * never obscured by the finger.
+ *
+ * Prefers positioning above the touch point (with [verticalOffsetPx] gap). Flips below
+ * the finger (adding [fingerHeightPx] + [verticalOffsetPx]) when there is not enough
+ * room above. The result is clamped to the component bounds on all sides.
+ */
+@VisibleForTesting
+internal fun magnifierOffset(
+    position: Offset,
+    magnifierSizePx: Float,
+    verticalOffsetPx: Float,
+    fingerHeightPx: Float,
+    componentWidth: Int,
+    componentHeight: Int,
+): Offset {
+    val clampedX = (position.x - magnifierSizePx / 2)
+        .coerceIn(0f, (componentWidth.toFloat() - magnifierSizePx).coerceAtLeast(0f))
+    val spaceAbove = position.y - verticalOffsetPx - magnifierSizePx
+    return if (spaceAbove >= 0f) {
+        Offset(x = clampedX, y = spaceAbove)
+    } else {
+        val yBelow = position.y + fingerHeightPx + verticalOffsetPx
+        Offset(x = clampedX, y = yBelow.coerceAtMost((componentHeight.toFloat() - magnifierSizePx).coerceAtLeast(0f)))
+    }
 }
 
 /**
@@ -1752,18 +2147,28 @@ private fun MagnifyingGlass(
     textPaint: TextPaint,
     backgroundColor: Color,
     foregroundColor: Color,
-    selectionManager: SelectionManager
+    selectionManager: SelectionManager,
+    autoDetectUrls: Boolean = false,
+    componentWidth: Int = 0,
+    componentHeight: Int = 0,
+    selectionBackgroundColor: Color = Color(0xFFB3D7FF),
+    selectionForegroundColor: Color = Color.Black,
 ) {
     val magnifierSize = MAGNIFIER_SIZE_DP.dp
     val magnifierScale = MAGNIFIER_SCALE
     val density = LocalDensity.current
     val magnifierSizePx = with(density) { magnifierSize.toPx() }
 
-    // Position magnifying glass well above the finger (so it's visible)
     val verticalOffset = with(density) { MAGNIFIER_VERTICAL_OFFSET.toPx() }
-    val magnifierPos = Offset(
-        x = (position.x - magnifierSizePx / 2).coerceIn(0f, Float.MAX_VALUE),
-        y = (position.y - verticalOffset - magnifierSizePx).coerceAtLeast(0f)
+    val fingerHeightPx = with(density) { FINGER_HEIGHT_DP.toPx() }
+
+    val magnifierPos = magnifierOffset(
+        position = position,
+        magnifierSizePx = magnifierSizePx,
+        verticalOffsetPx = verticalOffset,
+        fingerHeightPx = fingerHeightPx,
+        componentWidth = componentWidth,
+        componentHeight = componentHeight,
     )
 
     // Compute the terminal-coordinate origin that maps the touch point
@@ -1778,25 +2183,25 @@ private fun MagnifyingGlass(
         modifier = Modifier
             .offset(
                 x = with(density) { magnifierPos.x.toDp() },
-                y = with(density) { magnifierPos.y.toDp() }
+                y = with(density) { magnifierPos.y.toDp() },
             )
             .size(magnifierSize)
             .border(
                 width = MAGNIFIER_BORDER_WIDTH,
                 color = Color.Gray,
-                shape = CircleShape
+                shape = CircleShape,
             )
             .background(
                 color = Color.White.copy(alpha = MAGNIFIER_BACKGROUND_ALPHA),
-                shape = CircleShape
+                shape = CircleShape,
             )
-            .clip(CircleShape)
+            .clip(CircleShape),
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
             // Fill background
             drawRect(
                 color = backgroundColor,
-                size = size
+                size = size,
             )
 
             // Apply magnification and translate to center the touch point
@@ -1818,7 +2223,10 @@ private fun MagnifyingGlass(
                             textPaint = textPaint,
                             defaultFg = foregroundColor,
                             defaultBg = backgroundColor,
-                            selectionManager = selectionManager
+                            selectionManager = selectionManager,
+                            autoDetectUrls = autoDetectUrls,
+                            selectionBackgroundColor = selectionBackgroundColor,
+                            selectionForegroundColor = selectionForegroundColor,
                         )
                     }
                 }
@@ -1864,7 +2272,7 @@ private fun DrawScope.drawSelectionHandle(
     drawCircle(
         color = color,
         radius = circleRadius,
-        center = Offset(handleX, circleY)
+        center = Offset(handleX, circleY),
     )
 }
 
@@ -1877,7 +2285,11 @@ private fun DrawScope.drawCursor(
     charWidth: Float,
     charHeight: Float,
     foregroundColor: Color,
-    cursorShape: CursorShape = CursorShape.BLOCK
+    backgroundColor: Color = Color.Transparent,
+    cursorShape: CursorShape = CursorShape.BLOCK,
+    pendingDeadChar: Int = 0,
+    charBaseline: Float = 0f,
+    textPaint: TextPaint? = null,
 ) {
     val x = col * charWidth
     val y = row * charHeight
@@ -1889,7 +2301,7 @@ private fun DrawScope.drawCursor(
                 color = foregroundColor,
                 topLeft = Offset(x, y),
                 size = Size(charWidth, charHeight),
-                alpha = CURSOR_BLOCK_ALPHA
+                alpha = CURSOR_BLOCK_ALPHA,
             )
         }
 
@@ -1900,7 +2312,7 @@ private fun DrawScope.drawCursor(
                 color = foregroundColor,
                 topLeft = Offset(x, y + charHeight - underlineHeight),
                 size = Size(charWidth, underlineHeight),
-                alpha = CURSOR_LINE_ALPHA
+                alpha = CURSOR_LINE_ALPHA,
             )
         }
 
@@ -1911,9 +2323,45 @@ private fun DrawScope.drawCursor(
                 color = foregroundColor,
                 topLeft = Offset(x, y),
                 size = Size(barWidth, charHeight),
-                alpha = CURSOR_LINE_ALPHA
+                alpha = CURSOR_LINE_ALPHA,
             )
         }
+    }
+
+    // Draw pending dead character if present
+    if (pendingDeadChar != 0 && textPaint != null) {
+        val savedColor = textPaint.color
+        val savedBold = textPaint.isFakeBoldText
+        val savedSkew = textPaint.textSkewX
+        val savedUnderline = textPaint.isUnderlineText
+        val savedStrike = textPaint.isStrikeThruText
+
+        // Use opposite color for block cursor to ensure visibility
+        val accentColor =
+            if (cursorShape == CursorShape.BLOCK) {
+                if (foregroundColor.luminance() > 0.5f) Color.Black else Color.White
+            } else {
+                foregroundColor
+            }
+
+        textPaint.color = accentColor.toArgb()
+        textPaint.isFakeBoldText = false
+        textPaint.textSkewX = 0f
+        textPaint.isUnderlineText = false
+        textPaint.isStrikeThruText = false
+
+        drawContext.canvas.nativeCanvas.drawText(
+            String(Character.toChars(pendingDeadChar)),
+            x,
+            y + charBaseline,
+            textPaint,
+        )
+
+        textPaint.color = savedColor
+        textPaint.isFakeBoldText = savedBold
+        textPaint.textSkewX = savedSkew
+        textPaint.isUnderlineText = savedUnderline
+        textPaint.isStrikeThruText = savedStrike
     }
 }
 
@@ -1946,7 +2394,7 @@ private fun DrawScope.drawComposeOverlay(
     charWidth: Float,
     charHeight: Float,
     charBaseline: Float,
-    textPaint: TextPaint
+    textPaint: TextPaint,
 ) {
     val x = cursorCol * charWidth
     val y = cursorRow * charHeight
@@ -1965,7 +2413,7 @@ private fun DrawScope.drawComposeOverlay(
     drawRect(
         color = COMPOSE_OVERLAY_BACKGROUND,
         topLeft = Offset(x, y),
-        size = Size(displayWidth.coerceAtLeast(charWidth), charHeight)
+        size = Size(displayWidth.coerceAtLeast(charWidth), charHeight),
     )
 
     // Draw text
@@ -1986,7 +2434,7 @@ private fun DrawScope.drawComposeOverlay(
             displayText,
             x,
             y + charBaseline,
-            textPaint
+            textPaint,
         )
 
         textPaint.color = savedColor
@@ -2002,7 +2450,7 @@ private fun DrawScope.drawComposeOverlay(
         color = Color.White,
         topLeft = Offset(cursorX, y),
         size = Size(COMPOSE_CURSOR_BAR_WIDTH, charHeight),
-        alpha = CURSOR_LINE_ALPHA
+        alpha = CURSOR_LINE_ALPHA,
     )
 }
 
@@ -2099,7 +2547,7 @@ private fun calculateDimensions(
     cols: Int,
     fontSize: Float,
     typeface: Typeface,
-    density: Float
+    density: Float,
 ): Pair<Float, Float> {
     val textPaint = TextPaint().apply {
         this.typeface = typeface
@@ -2108,7 +2556,7 @@ private fun calculateDimensions(
 
     val charWidth = textPaint.measureText("M")
     val metrics = textPaint.fontMetrics
-    val charHeight = metrics.descent - metrics.ascent
+    val charHeight = ceil(metrics.descent - metrics.ascent)
 
     val width = cols * charWidth
     val height = rows * charHeight
@@ -2140,7 +2588,7 @@ private fun findOptimalFontSize(
     minSize: Float,
     maxSize: Float,
     typeface: Typeface,
-    density: Float
+    density: Float,
 ): Float {
     var minSizeCurrent = minSize
     var maxSizeCurrent = maxSize
@@ -2153,7 +2601,7 @@ private fun findOptimalFontSize(
             cols = targetCols,
             fontSize = midSize,
             typeface = typeface,
-            density = density
+            density = density,
         )
 
         if (width <= availableWidth && height <= availableHeight) {
@@ -2169,5 +2617,4 @@ private fun findOptimalFontSize(
     return minSizeCurrent.coerceIn(minSize, maxSize)
 }
 
-private fun charsPerDimension(pixels: Int, charPixels: Float) =
-    (pixels / charPixels).toInt().coerceAtLeast(1)
+private fun charsPerDimension(pixels: Int, charPixels: Float) = (pixels / charPixels).toInt().coerceAtLeast(1)

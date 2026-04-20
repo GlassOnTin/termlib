@@ -24,6 +24,7 @@ import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import androidx.compose.ui.input.key.KeyEvent as ComposeKeyEvent
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,7 +45,11 @@ internal class ImeInputView(
     context: Context,
     private val keyboardHandler: KeyboardHandler,
     internal val inputMethodManager: InputMethodManager =
-        context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager,
+    internal val onUpdateSelection: (view: View, selStart: Int, selEnd: Int, candidatesStart: Int, candidatesEnd: Int) -> Unit =
+        { view, selStart, selEnd, candidatesStart, candidatesEnd ->
+            inputMethodManager.updateSelection(view, selStart, selEnd, candidatesStart, candidatesEnd)
+        },
 ) : View(context) {
 
     init {
@@ -237,7 +242,7 @@ internal class ImeInputView(
         // backspaces or duplicated input).
         activeConnection?.editable?.clear()
         activeConnection?.resetComposition()
-        inputMethodManager.updateSelection(this, 0, 0, -1, -1)
+        onUpdateSelection(this, 0, 0, -1, -1)
     }
 
     /**
@@ -245,7 +250,7 @@ internal class ImeInputView(
      */
     private inner class TerminalInputConnection(
         targetView: View,
-        private val fullEditor: Boolean
+        private val fullEditor: Boolean,
     ) : BaseInputConnection(targetView, fullEditor) {
 
         private var composingText: String = ""
@@ -310,6 +315,8 @@ internal class ImeInputView(
         }
 
         override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+            if (!fullEditor) return super.setComposingText(text, newCursorPosition)
+
             val newText = text?.toString() ?: ""
             super.setComposingText(text, newCursorPosition)
 
@@ -328,6 +335,8 @@ internal class ImeInputView(
         }
 
         override fun finishComposingText(): Boolean {
+            if (!fullEditor) return super.finishComposingText()
+
             super.finishComposingText()
 
             // Replacement confirmed via finishComposingText (rather than
@@ -462,7 +471,7 @@ internal class ImeInputView(
             // from landing in Gboard's suggestion bar as one candidate.
             if (isEnterDown) {
                 editable?.clear()
-                inputMethodManager.updateSelection(this@ImeInputView, 0, 0, -1, -1)
+                onUpdateSelection(this@ImeInputView, 0, 0, -1, -1)
             }
             return result
         }

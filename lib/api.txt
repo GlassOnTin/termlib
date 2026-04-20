@@ -3,11 +3,24 @@ package org.connectbot.terminal {
 
   public interface ComposeController {
     method public String getComposedText();
+    method @InaccessibleFromKotlin public default int getPendingDeadChar();
     method @InaccessibleFromKotlin public boolean isComposeModeActive();
     method public void startComposeMode();
     method public void stopComposeMode();
     method public void toggleComposeMode();
     property public abstract boolean isComposeModeActive;
+    property public default int pendingDeadChar;
+  }
+
+  public abstract sealed exhaustive class DelKeyMode {
+  }
+
+  public static final class DelKeyMode.Backspace extends org.connectbot.terminal.DelKeyMode {
+    field public static final org.connectbot.terminal.DelKeyMode.Backspace INSTANCE;
+  }
+
+  public static final class DelKeyMode.Delete extends org.connectbot.terminal.DelKeyMode {
+    field public static final org.connectbot.terminal.DelKeyMode.Delete INSTANCE;
   }
 
   public interface ModifierManager {
@@ -25,6 +38,17 @@ package org.connectbot.terminal {
     enum_constant public static final org.connectbot.terminal.ProgressState WARNING;
   }
 
+  public abstract sealed exhaustive class RightAltMode {
+  }
+
+  public static final class RightAltMode.CharacterModifier extends org.connectbot.terminal.RightAltMode {
+    field public static final org.connectbot.terminal.RightAltMode.CharacterModifier INSTANCE;
+  }
+
+  public static final class RightAltMode.Meta extends org.connectbot.terminal.RightAltMode {
+    field public static final org.connectbot.terminal.RightAltMode.Meta INSTANCE;
+  }
+
   public interface SelectionController {
     method public void clearSelection();
     method public String copySelection();
@@ -34,16 +58,31 @@ package org.connectbot.terminal {
     method public void moveSelectionLeft();
     method public void moveSelectionRight();
     method public void moveSelectionUp();
+    method public void selectAll();
+    method public void setSelectionMode(org.connectbot.terminal.SelectionMode mode);
     method public void startSelection(optional org.connectbot.terminal.SelectionMode mode);
     method public void toggleSelection();
     method public void toggleSelectionMode();
     property public abstract boolean isSelectionActive;
   }
 
-  public enum SelectionMode {
-    enum_constant public static final org.connectbot.terminal.SelectionMode BLOCK;
-    enum_constant public static final org.connectbot.terminal.SelectionMode LINE;
-    enum_constant public static final org.connectbot.terminal.SelectionMode NONE;
+  public abstract sealed exhaustive class SelectionMode {
+  }
+
+  public static final class SelectionMode.CHARACTER extends org.connectbot.terminal.SelectionMode {
+    field public static final org.connectbot.terminal.SelectionMode.CHARACTER INSTANCE;
+  }
+
+  public static final class SelectionMode.LINE extends org.connectbot.terminal.SelectionMode {
+    field public static final org.connectbot.terminal.SelectionMode.LINE INSTANCE;
+  }
+
+  public static final class SelectionMode.NONE extends org.connectbot.terminal.SelectionMode {
+    field public static final org.connectbot.terminal.SelectionMode.NONE INSTANCE;
+  }
+
+  public static final class SelectionMode.WORD extends org.connectbot.terminal.SelectionMode {
+    field public static final org.connectbot.terminal.SelectionMode.WORD INSTANCE;
   }
 
   public final class TerminalDimensions {
@@ -60,8 +99,11 @@ package org.connectbot.terminal {
   public sealed nonexhaustive interface TerminalEmulator {
     method public void applyColorScheme(int[] ansiColors, int defaultForeground, int defaultBackground);
     method public void clearScreen();
-    method public void dispatchCharacter(int modifiers, char character);
+    method @Deprecated public default void dispatchCharacter(int modifiers, char ch);
+    method public void dispatchCharacter(int modifiers, int codepoint);
     method public void dispatchKey(int modifiers, int key);
+    method @InaccessibleFromKotlin public boolean getAutoDetectUrls();
+    method @InaccessibleFromKotlin public boolean getBoldAsBright();
     method @InaccessibleFromKotlin public org.connectbot.terminal.TerminalDimensions getDimensions();
     method public String? getLastCommandOutput();
     method public void resize(int newRows, int newCols);
@@ -69,6 +111,8 @@ package org.connectbot.terminal {
     method public int setDefaultColors(int foreground, int background);
     method public void writeInput(byte[] data, optional int offset, optional int length);
     method public void writeInput(java.nio.ByteBuffer buffer, int length);
+    property public abstract boolean autoDetectUrls;
+    property public abstract boolean boldAsBright;
     property public abstract org.connectbot.terminal.TerminalDimensions dimensions;
   }
 
@@ -78,12 +122,11 @@ package org.connectbot.terminal {
   }
 
   public static final class TerminalEmulatorFactory.Companion {
-    method @KotlinOnly public org.connectbot.terminal.TerminalEmulator create(optional android.os.Looper looper, optional int initialRows, optional int initialCols, optional androidx.compose.ui.graphics.Color defaultForeground, optional androidx.compose.ui.graphics.Color defaultBackground, optional kotlin.jvm.functions.Function1<byte[],kotlin.Unit> onKeyboardInput, optional kotlin.jvm.functions.Function0<kotlin.Unit>? onBell, optional kotlin.jvm.functions.Function1<org.connectbot.terminal.TerminalDimensions,kotlin.Unit>? onResize, optional kotlin.jvm.functions.Function1<java.lang.String,kotlin.Unit>? onClipboardCopy, optional kotlin.jvm.functions.Function2<org.connectbot.terminal.ProgressState,java.lang.Integer,kotlin.Unit>? onProgressChange);
+    method @KotlinOnly public org.connectbot.terminal.TerminalEmulator create(optional android.os.Looper looper, optional int initialRows, optional int initialCols, optional androidx.compose.ui.graphics.Color defaultForeground, optional androidx.compose.ui.graphics.Color defaultBackground, optional kotlin.jvm.functions.Function1<byte[],kotlin.Unit> onKeyboardInput, optional kotlin.jvm.functions.Function0<kotlin.Unit>? onBell, optional kotlin.jvm.functions.Function1<org.connectbot.terminal.TerminalDimensions,kotlin.Unit>? onResize, optional kotlin.jvm.functions.Function1<java.lang.String,kotlin.Unit>? onClipboardCopy, optional kotlin.jvm.functions.Function2<org.connectbot.terminal.ProgressState,java.lang.Integer,kotlin.Unit>? onProgressChange, optional boolean autoDetectUrls, optional boolean boldAsBright);
   }
 
   public final class TerminalKt {
-    method @KotlinOnly @androidx.compose.runtime.Composable public static void Terminal(org.connectbot.terminal.TerminalEmulator terminalEmulator, optional androidx.compose.ui.Modifier modifier, optional android.graphics.Typeface typeface, optional androidx.compose.ui.unit.TextUnit initialFontSize, optional androidx.compose.ui.unit.TextUnit minFontSize, optional androidx.compose.ui.unit.TextUnit maxFontSize, optional androidx.compose.ui.graphics.Color backgroundColor, optional androidx.compose.ui.graphics.Color foregroundColor, optional boolean keyboardEnabled, optional boolean showSoftKeyboard, optional androidx.compose.ui.focus.FocusRequester focusRequester, optional kotlin.jvm.functions.Function0<kotlin.Unit> onTerminalTap, optional kotlin.jvm.functions.Function1<java.lang.Boolean,kotlin.Unit> onImeVisibilityChanged, optional kotlin.Pair<java.lang.Integer,java.lang.Integer>? forcedSize, optional org.connectbot.terminal.ModifierManager? modifierManager, optional kotlin.jvm.functions.Function1<org.connectbot.terminal.SelectionController,kotlin.Unit>? onSelectionControllerAvailable, optional kotlin.jvm.functions.Function1<java.lang.String,kotlin.Unit> onHyperlinkClick, optional kotlin.jvm.functions.Function1<org.connectbot.terminal.ComposeController,kotlin.Unit>? onComposeControllerAvailable);
-    method @KotlinOnly @VisibleForTesting @androidx.compose.runtime.Composable public static void TerminalWithAccessibility(org.connectbot.terminal.TerminalEmulator terminalEmulator, optional androidx.compose.ui.Modifier modifier, optional android.graphics.Typeface typeface, optional androidx.compose.ui.unit.TextUnit initialFontSize, optional androidx.compose.ui.unit.TextUnit minFontSize, optional androidx.compose.ui.unit.TextUnit maxFontSize, optional androidx.compose.ui.graphics.Color backgroundColor, optional androidx.compose.ui.graphics.Color foregroundColor, optional boolean keyboardEnabled, optional boolean showSoftKeyboard, optional androidx.compose.ui.focus.FocusRequester focusRequester, optional kotlin.jvm.functions.Function0<kotlin.Unit> onTerminalTap, optional kotlin.jvm.functions.Function1<java.lang.Boolean,kotlin.Unit> onImeVisibilityChanged, optional kotlin.Pair<java.lang.Integer,java.lang.Integer>? forcedSize, optional org.connectbot.terminal.ModifierManager? modifierManager, optional Boolean? forceAccessibilityEnabled, optional kotlin.jvm.functions.Function1<org.connectbot.terminal.SelectionController,kotlin.Unit>? onSelectionControllerAvailable, optional kotlin.jvm.functions.Function1<java.lang.String,kotlin.Unit> onHyperlinkClick, optional kotlin.jvm.functions.Function1<org.connectbot.terminal.ComposeController,kotlin.Unit>? onComposeControllerAvailable);
+    method @KotlinOnly @androidx.compose.runtime.Composable public static void Terminal(org.connectbot.terminal.TerminalEmulator terminalEmulator, optional androidx.compose.ui.Modifier modifier, optional android.graphics.Typeface typeface, optional androidx.compose.ui.unit.TextUnit initialFontSize, optional androidx.compose.ui.unit.TextUnit minFontSize, optional androidx.compose.ui.unit.TextUnit maxFontSize, optional androidx.compose.ui.graphics.Color backgroundColor, optional androidx.compose.ui.graphics.Color foregroundColor, optional androidx.compose.ui.graphics.Color selectionBackgroundColor, optional androidx.compose.ui.graphics.Color selectionForegroundColor, optional boolean keyboardEnabled, optional boolean showSoftKeyboard, optional androidx.compose.ui.focus.FocusRequester focusRequester, optional kotlin.jvm.functions.Function0<kotlin.Unit> onTerminalTap, optional kotlin.jvm.functions.Function1<java.lang.Boolean,kotlin.Unit> onImeVisibilityChanged, optional kotlin.Pair<java.lang.Integer,java.lang.Integer>? forcedSize, optional org.connectbot.terminal.ModifierManager? modifierManager, optional kotlin.jvm.functions.Function1<org.connectbot.terminal.SelectionController,kotlin.Unit>? onSelectionControllerAvailable, optional kotlin.jvm.functions.Function1<java.lang.String,kotlin.Unit> onHyperlinkClick, optional kotlin.jvm.functions.Function1<org.connectbot.terminal.ComposeController,kotlin.Unit>? onComposeControllerAvailable, optional kotlin.jvm.functions.Function0<kotlin.Unit>? onPasteRequest, optional org.connectbot.terminal.RightAltMode rightAltMode, optional org.connectbot.terminal.DelKeyMode delKeyMode);
   }
 
   public final class VTermKey {

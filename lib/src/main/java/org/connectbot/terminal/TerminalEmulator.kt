@@ -20,6 +20,7 @@ import android.icu.lang.UCharacter
 import android.icu.lang.UProperty
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.annotation.VisibleForTesting
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -56,7 +57,16 @@ sealed interface TerminalEmulator {
     /**
      * Dispatch a character to the terminal.
      */
-    fun dispatchCharacter(modifiers: Int, character: Char)
+    @Deprecated(
+        message = "Use dispatchCharacter(modifiers, codepoint) for full Unicode code point support",
+        replaceWith = ReplaceWith("dispatchCharacter(modifiers, ch.code)"),
+    )
+    fun dispatchCharacter(modifiers: Int, ch: Char) = dispatchCharacter(modifiers, ch.code)
+
+    /**
+     * Dispatch a character to the terminal.
+     */
+    fun dispatchCharacter(modifiers: Int, codepoint: Int)
 
     /**
      * Clears the terminal emulator screen.
@@ -100,10 +110,24 @@ sealed interface TerminalEmulator {
     fun applyColorScheme(
         ansiColors: IntArray,
         defaultForeground: Int,
-        defaultBackground: Int
+        defaultBackground: Int,
     )
 
     val dimensions: TerminalDimensions
+
+    /**
+     * Whether plain-text URL auto-detection is enabled.
+     *
+     * When true, [TerminalLine.getHyperlinkUrlAt] will scan line text for URLs in addition
+     * to OSC 8 hyperlink segments. When false, only OSC 8 segments are used.
+     */
+    val autoDetectUrls: Boolean
+
+    /**
+     * Whether bold text using low-intensity ANSI colors (0–7) promotes to the
+     * corresponding bright palette color (8–15), matching xterm's boldColors behavior.
+     */
+    val boldAsBright: Boolean
 
     /**
      * Get the text output of the last completed command.
@@ -143,6 +167,12 @@ class TerminalEmulatorFactory {
          *                        The callback receives the decoded text to copy.
          * @param onProgressChange Optional callback for OSC 9;4 progress reporting.
          *                         The callback receives the progress state and percentage (0-100).
+         * @param autoDetectUrls Whether to scan terminal line text for plain-text URLs and expose
+         *                       them via [TerminalLine.getHyperlinkUrlAt] as a fallback when no
+         *                       OSC 8 hyperlink covers the column. Defaults to false.
+         * @param boldAsBright Whether bold text using low-intensity ANSI colors (0–7) promotes to
+         *                     the corresponding bright palette color (8–15), matching xterm's
+         *                     default boldColors behavior. Defaults to true.
          */
         fun create(
             looper: Looper = Looper.getMainLooper(),
@@ -156,21 +186,23 @@ class TerminalEmulatorFactory {
             onClipboardCopy: ((String) -> Unit)? = null,
             onProgressChange: ((ProgressState, Int) -> Unit)? = null,
             enableAltScreen: Boolean = true,
-        ): TerminalEmulator {
-            return TerminalEmulatorImpl(
-                looper = looper,
-                initialRows = initialRows,
-                initialCols = initialCols,
-                defaultForeground = defaultForeground,
-                defaultBackground = defaultBackground,
-                onKeyboardInput = onKeyboardInput,
-                onBell = onBell,
-                onResize = onResize,
-                onClipboardCopy = onClipboardCopy,
-                onProgressChange = onProgressChange,
-                enableAltScreen = enableAltScreen,
-            )
-        }
+            autoDetectUrls: Boolean = false,
+            boldAsBright: Boolean = true,
+        ): TerminalEmulator = TerminalEmulatorImpl(
+            looper = looper,
+            initialRows = initialRows,
+            initialCols = initialCols,
+            defaultForeground = defaultForeground,
+            defaultBackground = defaultBackground,
+            onKeyboardInput = onKeyboardInput,
+            onBell = onBell,
+            onResize = onResize,
+            onClipboardCopy = onClipboardCopy,
+            onProgressChange = onProgressChange,
+            enableAltScreen = enableAltScreen,
+            autoDetectUrls = autoDetectUrls,
+            boldAsBright = boldAsBright,
+        )
     }
 }
 
@@ -216,7 +248,10 @@ internal class TerminalEmulatorImpl(
     private val onClipboardCopy: ((String) -> Unit)? = null,
     private val onProgressChange: ((ProgressState, Int) -> Unit)? = null,
     private val enableAltScreen: Boolean = true,
-) : TerminalEmulator, TerminalCallbacks {
+    override val autoDetectUrls: Boolean = false,
+    override val boldAsBright: Boolean = true,
+) : TerminalEmulator,
+    TerminalCallbacks {
 
     // Handler for escaping native mutex
     private val handler = Handler(looper)
@@ -237,7 +272,7 @@ internal class TerminalEmulatorImpl(
 
     // StateFlow for reactive state propagation
     private val _snapshot = MutableStateFlow(
-        TerminalSnapshot.empty(initialRows, initialCols, currentDefaultForeground, currentDefaultBackground)
+        TerminalSnapshot.empty(initialRows, initialCols, currentDefaultForeground, currentDefaultBackground),
     )
     internal val snapshot: StateFlow<TerminalSnapshot> = _snapshot.asStateFlow()
 
@@ -267,6 +302,7 @@ internal class TerminalEmulatorImpl(
     // Scrollback buffer
     private val scrollback = mutableListOf<TerminalLine>()
     private val maxScrollbackLines = 1000
+
     // Cached immutable copy of scrollback - only recreate when scrollback changes
     private var scrollbackSnapshot: List<TerminalLine> = emptyList()
     private var scrollbackDirty = false
@@ -283,6 +319,9 @@ internal class TerminalEmulatorImpl(
     private val terminalNative by lazy {
         TerminalNative(this, enableAltScreen).apply {
             resize(initialRows, initialCols)
+            if (setBoldHighbright(boldAsBright) != 0) {
+                Log.e(TAG, "Failed to set boldAsBright=$boldAsBright")
+            }
         }
     }
 
@@ -356,8 +395,8 @@ internal class TerminalEmulatorImpl(
     /**
      * Dispatch a character to the terminal.
      */
-    override fun dispatchCharacter(modifiers: Int, character: Char) {
-        terminalNative.dispatchCharacter(modifiers, character.code)
+    override fun dispatchCharacter(modifiers: Int, codepoint: Int) {
+        terminalNative.dispatchCharacter(modifiers, codepoint)
     }
 
     /**
@@ -426,7 +465,7 @@ internal class TerminalEmulatorImpl(
     override fun applyColorScheme(
         ansiColors: IntArray,
         defaultForeground: Int,
-        defaultBackground: Int
+        defaultBackground: Int,
     ) {
         require(ansiColors.size >= 16) {
             "Color scheme must provide 16 ANSI colors"
@@ -490,6 +529,7 @@ internal class TerminalEmulatorImpl(
                         propertyChanged = true
                     }
                 }
+
                 is TerminalProperty.BoolValue -> {
                     when (prop) {
                         // Property 1 is VTERM_PROP_CURSORVISIBLE (from vterm.h line 254)
@@ -497,6 +537,7 @@ internal class TerminalEmulatorImpl(
                             cursorVisible = value.value
                             propertyChanged = true
                         }
+
                         // Property 2 is VTERM_PROP_CURSORBLINK (from vterm.h line 255)
                         2 -> {
                             cursorBlink = value.value
@@ -504,18 +545,26 @@ internal class TerminalEmulatorImpl(
                         }
                     }
                 }
+
                 is TerminalProperty.IntValue -> {
                     // Property 6 is VTERM_PROP_CURSORSHAPE (from vterm.h line 260)
                     if (prop == 6) {
                         cursorShape = when (value.value) {
-                            1 -> CursorShape.BLOCK       // VTERM_PROP_CURSORSHAPE_BLOCK
-                            2 -> CursorShape.UNDERLINE   // VTERM_PROP_CURSORSHAPE_UNDERLINE
-                            3 -> CursorShape.BAR_LEFT    // VTERM_PROP_CURSORSHAPE_BAR_LEFT
+                            1 -> CursorShape.BLOCK
+
+                            // VTERM_PROP_CURSORSHAPE_BLOCK
+                            2 -> CursorShape.UNDERLINE
+
+                            // VTERM_PROP_CURSORSHAPE_UNDERLINE
+                            3 -> CursorShape.BAR_LEFT
+
+                            // VTERM_PROP_CURSORSHAPE_BAR_LEFT
                             else -> CursorShape.BLOCK
                         }
                         propertyChanged = true
                     }
                 }
+
                 else -> {
                     // Other properties not handled
                 }
@@ -549,7 +598,7 @@ internal class TerminalEmulatorImpl(
                 underline = screenCell.underline,
                 reverse = screenCell.reverse,
                 strike = screenCell.strike,
-                width = screenCell.width
+                width = screenCell.width,
             )
         }
 
@@ -585,13 +634,13 @@ internal class TerminalEmulatorImpl(
                 val newLines = currentLines.toMutableList()
                 for (row in 0 until shiftEnd - 1) {
                     newLines[row] = currentLines[row].copy(
-                        semanticSegments = currentLines[row + 1].semanticSegments
+                        semanticSegments = currentLines[row + 1].semanticSegments,
                     )
                 }
                 // Clear segments for the last line in the scroll region
                 if (shiftEnd > 0 && shiftEnd <= currentLines.size) {
                     newLines[shiftEnd - 1] = currentLines[shiftEnd - 1].copy(
-                        semanticSegments = emptyList()
+                        semanticSegments = emptyList(),
                     )
                 }
                 currentLines = newLines
@@ -664,10 +713,10 @@ internal class TerminalEmulatorImpl(
         return 0
     }
 
-    override fun onOscSequence(command: Int, payload: String, nativeCursorRow: Int, nativeCursorCol: Int): Int {
+    override fun onOscSequence(command: Int, payload: String, cursorRow: Int, cursorCol: Int): Int {
         // Use the native cursor position from libvterm for OSC sequence processing
         val actions = synchronized(damageLock) {
-            oscParser.parse(command, payload, nativeCursorRow, nativeCursorCol, cols)
+            oscParser.parse(command, payload, cursorRow, cursorCol, cols)
         }
 
         synchronized(damageLock) {
@@ -680,9 +729,10 @@ internal class TerminalEmulatorImpl(
                             action.endCol,
                             action.type,
                             action.metadata,
-                            action.promptId
+                            action.promptId,
                         )
                     }
+
                     is OscParser.Action.SetCursorShape -> {
                         cursorShape = action.shape
                         propertyChanged = true
@@ -691,12 +741,14 @@ internal class TerminalEmulatorImpl(
                             damagePosted = true
                         }
                     }
+
                     is OscParser.Action.ClipboardCopy -> {
                         // Post clipboard copy to handler thread to avoid blocking native callback
                         handler.post {
                             onClipboardCopy?.invoke(action.data)
                         }
                     }
+
                     is OscParser.Action.SetProgress -> {
                         // Post progress change to handler thread to avoid blocking native callback
                         handler.post {
@@ -719,7 +771,7 @@ internal class TerminalEmulatorImpl(
         endCol: Int,
         semanticType: SemanticType,
         metadata: String?,
-        promptId: Int
+        promptId: Int,
     ) {
         synchronized(damageLock) {
             // Apply immediately to currentLines so segments are shifted correctly during scroll
@@ -733,7 +785,7 @@ internal class TerminalEmulatorImpl(
                 endCol = endCol,
                 semanticType = semanticType,
                 metadata = metadata,
-                promptId = promptId
+                promptId = promptId,
             )
 
             val updatedSegments = (line.semanticSegments + newSegment).sortedBy { it.startCol }
@@ -778,7 +830,7 @@ internal class TerminalEmulatorImpl(
         for (region in damageRegions) {
             // Ensure row is within bounds [0, rows)
             val startRow = region.startRow.coerceIn(0, rows - 1)
-            val endRow = region.endRow.coerceIn(startRow, rows)  // endRow is exclusive
+            val endRow = region.endRow.coerceIn(startRow, rows) // endRow is exclusive
             for (row in startRow until endRow) {
                 updateLine(row)
             }
@@ -820,7 +872,7 @@ internal class TerminalEmulatorImpl(
             endCol = segment.endCol,
             semanticType = segment.semanticType,
             metadata = segment.metadata,
-            promptId = segment.promptId
+            promptId = segment.promptId,
         )
 
         // Add to existing segments (sorted by startCol)
@@ -864,8 +916,8 @@ internal class TerminalEmulatorImpl(
                         TerminalLine.Cell(
                             char = ' ',
                             fgColor = currentDefaultFg,
-                            bgColor = currentDefaultBg
-                        )
+                            bgColor = currentDefaultBg,
+                        ),
                     )
                     col++
                 }
@@ -922,8 +974,8 @@ internal class TerminalEmulatorImpl(
                         blink = cellRun.blink,
                         reverse = cellRun.reverse,
                         strike = cellRun.strike,
-                        width = width
-                    )
+                        width = width,
+                    ),
                 )
 
                 cellsInRun++
@@ -968,8 +1020,8 @@ internal class TerminalEmulatorImpl(
                 scrollbackSnapshot = scrollback.toList()
                 scrollbackDirty = false
             }
-            lines = currentLines.toList()  // Immutable copy (24 references)
-            scrollbackCopy = scrollbackSnapshot  // Reuse cached immutable copy
+            lines = currentLines.toList() // Immutable copy (24 references)
+            scrollbackCopy = scrollbackSnapshot // Reuse cached immutable copy
         }
 
         return TerminalSnapshot(
@@ -984,7 +1036,7 @@ internal class TerminalEmulatorImpl(
             rows = rows,
             cols = cols,
             timestamp = System.currentTimeMillis(),
-            sequenceNumber = sequenceNumber++
+            sequenceNumber = sequenceNumber++,
         )
     }
 
@@ -1050,20 +1102,22 @@ internal class TerminalEmulatorImpl(
         }
     }
 
-    private fun isCombiningCharacter(char: Char): Boolean {
-        return UCharacter.hasBinaryProperty(char.code, UProperty.GRAPHEME_EXTEND)
-    }
+    private fun isCombiningCharacter(char: Char): Boolean = UCharacter.hasBinaryProperty(char.code, UProperty.GRAPHEME_EXTEND)
 
     private fun isFullwidthCharacter(char: Char): Boolean {
         val eastAsianWidth = UCharacter.getIntPropertyValue(char.code, UProperty.EAST_ASIAN_WIDTH)
         return eastAsianWidth == UCharacter.EastAsianWidth.FULLWIDTH ||
-               eastAsianWidth == UCharacter.EastAsianWidth.WIDE
+            eastAsianWidth == UCharacter.EastAsianWidth.WIDE
     }
 
     private fun isFullwidthCodepoint(codepoint: Int): Boolean {
         val eastAsianWidth = UCharacter.getIntPropertyValue(codepoint, UProperty.EAST_ASIAN_WIDTH)
         return eastAsianWidth == UCharacter.EastAsianWidth.FULLWIDTH ||
-               eastAsianWidth == UCharacter.EastAsianWidth.WIDE
+            eastAsianWidth == UCharacter.EastAsianWidth.WIDE
+    }
+
+    companion object {
+        private const val TAG = "TerminalEmulatorImpl"
     }
 }
 
@@ -1074,7 +1128,7 @@ private data class DamageRegion(
     val startRow: Int,
     val endRow: Int,
     val startCol: Int,
-    val endCol: Int
+    val endCol: Int,
 )
 
 /**
@@ -1088,7 +1142,7 @@ private data class PendingSemanticSegment(
     val endCol: Int,
     val semanticType: SemanticType,
     val metadata: String?,
-    val promptId: Int
+    val promptId: Int,
 )
 
 /**
@@ -1096,5 +1150,5 @@ private data class PendingSemanticSegment(
  */
 data class TerminalDimensions(
     val rows: Int,
-    val columns: Int
+    val columns: Int,
 )

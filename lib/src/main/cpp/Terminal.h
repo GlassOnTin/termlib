@@ -21,6 +21,30 @@
 #include <vterm.h>
 #include <memory>
 #include <mutex>
+#include <string>
+
+template<typename T>
+class ScopedLocalRef {
+public:
+    ScopedLocalRef(JNIEnv* env, T ref) : mEnv(env), mRef(ref) {}
+    ~ScopedLocalRef() { if (mRef) mEnv->DeleteLocalRef(mRef); }
+    T get() const { return mRef; }
+    operator T() const { return mRef; }
+    ScopedLocalRef(ScopedLocalRef&& other) noexcept : mEnv(other.mEnv), mRef(other.mRef) {
+        other.mRef = nullptr;
+    }
+    ScopedLocalRef(const ScopedLocalRef&) = delete;
+    ScopedLocalRef& operator=(ScopedLocalRef&& other) noexcept {
+        if (mRef) mEnv->DeleteLocalRef(mRef);
+        mEnv = other.mEnv;
+        mRef = other.mRef;
+        other.mRef = nullptr;
+        return *this;
+    }
+private:
+    JNIEnv* mEnv;
+    T mRef;
+};
 
 class Terminal {
 public:
@@ -46,6 +70,9 @@ public:
     // Color configuration
     int setPaletteColors(const uint32_t* colors, int count);
     int setDefaultColors(uint32_t fgColor, uint32_t bgColor);
+
+    // Terminal behavior options
+    int setBoldHighbright(int enabled);
 
 private:
     // libvterm screen callbacks (called by libvterm)

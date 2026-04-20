@@ -16,13 +16,19 @@
  */
 package org.connectbot.terminal
 
+import android.view.KeyCharacterMap
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
+import java.text.Normalizer
+import android.view.KeyEvent as AndroidKeyEvent
 import androidx.compose.ui.input.key.KeyEvent as ComposeKeyEvent
 
 /**
@@ -49,8 +55,48 @@ internal class KeyboardHandler(
     var selectionController: SelectionController? = null,
     var onInputProcessed: (() -> Unit)? = null,
     var onPasteShortcut: (() -> Unit)? = null,
+    /**
+     * Controls how the right-alt key (AltGr) is interpreted. Defaults to
+     * [RightAltMode.CharacterModifier] so that international keyboard layouts work correctly.
+     * Set to [RightAltMode.Meta] for US keyboard users who want right-alt to behave like
+     * left-alt (escape prefix).
+     */
+    var rightAltMode: RightAltMode = RightAltMode.CharacterModifier,
+    /**
+     * Controls whether the backspace key sends DEL (0x7f) or ^H (0x08). Defaults to
+     * [DelKeyMode.Delete]. Set to [DelKeyMode.Backspace] for servers that expect ^H.
+     * When [DelKeyMode.Backspace] is active, the Delete key sends DEL (0x7f) instead.
+     */
+    var delKeyMode: DelKeyMode = DelKeyMode.Delete,
+    /**
+     * Resolves a (deviceId, keyCode, metaState) triple to a raw Unicode value as returned by
+     * [android.view.KeyEvent.getUnicodeChar]. Injectable for testing dead-key logic without
+     * requiring a physical keyboard with dead keys.
+     *
+     * The `deviceId` is the keyboard device ID from the [android.view.KeyEvent] and is used to
+     * load the correct [KeyCharacterMap] so that physical keyboard layouts (e.g. German) are
+     * honored. Falls back to [KeyCharacterMap.VIRTUAL_KEYBOARD] if the device map is
+     * unavailable.
+     */
+    internal var unicodeCharLookup: (deviceId: Int, keyCode: Int, metaState: Int) -> Int =
+        { deviceId, keyCode, metaState ->
+            try {
+                KeyCharacterMap.load(deviceId)
+            } catch (_: KeyCharacterMap.UnavailableException) {
+                KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
+            }.get(keyCode, metaState)
+        },
 ) {
     var composeMode: ComposeMode? = null
+        set(value) {
+            if (field != value) {
+                pendingDeadChar = 0
+            }
+            field = value
+        }
+
+    var pendingDeadChar: Int by mutableStateOf(0)
+        internal set
 
     /**
      * Process a Compose KeyEvent and send to terminal.
@@ -63,7 +109,6 @@ internal class KeyboardHandler(
 
         val key = event.key
         val ctrl = event.isCtrlPressed
-        val alt = event.isAltPressed
         val shift = event.isShiftPressed
 
         // Hardware Ctrl+Shift+V → paste from Android clipboard.
@@ -71,7 +116,7 @@ internal class KeyboardHandler(
         // user preference is on); otherwise falls through and is
         // forwarded as a normal key combo.
         val pasteShortcut = onPasteShortcut
-        if (pasteShortcut != null && ctrl && shift && !alt && key == Key.V) {
+        if (pasteShortcut != null && ctrl && shift && !event.isAltPressed && key == Key.V) {
             pasteShortcut()
             return true
         }
@@ -82,18 +127,28 @@ internal class KeyboardHandler(
             when (key) {
                 Key.Enter -> {
                     val text = compose.commit()
-                    text?.forEach { char ->
-                        terminalEmulator.dispatchCharacter(0, char)
+                    text?.codePoints()?.forEach { codepoint ->
+                        terminalEmulator.dispatchCharacter(0, codepoint)
                     }
                     onInputProcessed?.invoke()
                 }
+
                 Key.Escape -> compose.cancel()
+
                 Key.Backspace -> compose.deleteLastChar()
+
                 else -> {
-                    if (!ctrl && !alt) {
-                        val char = getCharacterFromKey(key, shift)
-                        if (char != null) {
-                            compose.appendChar(char)
+                    if (!ctrl && !event.isAltPressed) {
+                        val codepoint = getCodePointFromKeyEvent(event)
+                        if (codepoint != null) {
+                            dispatchCodePoint(codepoint) { cp ->
+                                if (Character.isBmpCodePoint(cp)) {
+                                    compose.appendChar(cp.toChar())
+                                } else {
+                                    compose.appendChar(Character.highSurrogate(cp))
+                                    compose.appendChar(Character.lowSurrogate(cp))
+                                }
+                            }
                         }
                     }
                 }
@@ -109,28 +164,34 @@ internal class KeyboardHandler(
                     selection.moveSelectionUp()
                     return true
                 }
+
                 Key.DirectionDown -> {
                     selection.moveSelectionDown()
                     return true
                 }
+
                 Key.DirectionLeft -> {
                     selection.moveSelectionLeft()
                     return true
                 }
+
                 Key.DirectionRight -> {
                     selection.moveSelectionRight()
                     return true
                 }
+
                 Key.Enter -> {
                     // Finish selection (stop extending, but keep selected for copying)
                     selection.finishSelection()
                     return true
                 }
+
                 Key.Escape -> {
                     // Cancel selection
                     selection.clearSelection()
                     return true
                 }
+
                 // Any other key clears selection and goes to terminal
                 else -> {
                     selection.clearSelection()
@@ -139,12 +200,46 @@ internal class KeyboardHandler(
             }
         }
 
-        // Build modifier mask for libvterm (combine sticky + hardware modifiers)
-        val modifiers = buildModifierMask(ctrl, alt, shift)
+        // Determine whether right-alt counts as a terminal modifier or a character selector.
+        val nativeEvent = event.nativeKeyEvent
+        val rightAltPressed = nativeEvent.hasModifiers(AndroidKeyEvent.META_ALT_RIGHT_ON)
+        val rightAltIsMeta = rightAltPressed && rightAltMode == RightAltMode.Meta
+        val leftAltPressed = nativeEvent.hasModifiers(AndroidKeyEvent.META_ALT_LEFT_ON) ||
+            (!rightAltPressed && nativeEvent.metaState and AndroidKeyEvent.META_ALT_ON != 0)
+        val alt = leftAltPressed || rightAltIsMeta
+        val stripAltGr = rightAltIsMeta
+
+        // When DelKeyMode.Backspace is active, swap the byte sequences:
+        // Backspace → ^H (0x08), Delete → DEL (0x7f).
+        if (delKeyMode is DelKeyMode.Backspace) {
+            when (key) {
+                Key.Backspace -> {
+                    val modifiers = buildModifierMask(ctrl, alt, shift)
+                    pendingDeadChar = 0
+                    terminalEmulator.dispatchCharacter(modifiers, 0x08)
+                    modifierManager?.clearTransients()
+                    onInputProcessed?.invoke()
+                    return true
+                }
+
+                Key.Delete -> {
+                    val modifiers = buildModifierMask(ctrl, alt, shift)
+                    pendingDeadChar = 0
+                    terminalEmulator.dispatchKey(modifiers, VTermKey.BACKSPACE)
+                    modifierManager?.clearTransients()
+                    onInputProcessed?.invoke()
+                    return true
+                }
+
+                else -> {}
+            }
+        }
 
         // Check if this is a special key that libvterm handles
         val vtermKey = mapToVTermKey(key)
         if (vtermKey != null) {
+            val modifiers = buildModifierMask(ctrl, alt, shift)
+            pendingDeadChar = 0
             terminalEmulator.dispatchKey(modifiers, vtermKey)
             modifierManager?.clearTransients()
             onInputProcessed?.invoke()
@@ -152,9 +247,11 @@ internal class KeyboardHandler(
         }
 
         // Handle regular printable characters
-        val char = getCharacterFromKey(key, shift || modifierManager?.isShiftActive() == true)
-        if (char != null) {
-            terminalEmulator.dispatchCharacter(modifiers, char)
+        val stickyShift = modifierManager?.isShiftActive() == true
+        val codepoint = getCodePointFromKeyEvent(event, extraShift = stickyShift, stripAlt = stripAltGr)
+        if (codepoint != null) {
+            val modifiers = buildModifierMask(ctrl, alt, shift)
+            dispatchCodePoint(codepoint) { cp -> terminalEmulator.dispatchCharacter(modifiers, cp) }
             modifierManager?.clearTransients()
             onInputProcessed?.invoke()
             return true
@@ -176,7 +273,7 @@ internal class KeyboardHandler(
 
         val modifiers = buildModifierMask(ctrl, alt, false)
 
-        terminalEmulator.dispatchCharacter(modifiers, char)
+        terminalEmulator.dispatchCharacter(modifiers, char.code)
         modifierManager?.clearTransients()
         onInputProcessed?.invoke()
         return true
@@ -189,18 +286,23 @@ internal class KeyboardHandler(
     fun onTextInput(bytes: ByteArray) {
         if (bytes.isEmpty()) return
 
+        val raw = bytes.toString(Charsets.UTF_8)
+        val text = if (Normalizer.isNormalized(raw, Normalizer.Form.NFC)) {
+            raw
+        } else {
+            Normalizer.normalize(raw, Normalizer.Form.NFC)
+        }
+
         val compose = composeMode
         if (compose != null && compose.isActive) {
-            val text = bytes.toString(Charsets.UTF_8)
             compose.appendText(text)
             return
         }
 
         val modifiers = getModifierMask()
-        val text = bytes.toString(Charsets.UTF_8)
 
-        text.forEach { char ->
-            terminalEmulator.dispatchCharacter(modifiers, char)
+        text.codePoints().forEach { codepoint ->
+            terminalEmulator.dispatchCharacter(modifiers, codepoint)
         }
         modifierManager?.clearTransients()
         onInputProcessed?.invoke()
@@ -233,74 +335,97 @@ internal class KeyboardHandler(
     fun getModifierMask(): Int {
         return modifierManager?.let {
             var mask = 0
-            if (it.isShiftActive() == true) mask = mask or 1  // Bit 0: Shift
-            if (it.isAltActive() == true) mask = mask or 2    // Bit 1: Alt
-            if (it.isCtrlActive() == true) mask = mask or 4   // Bit 2: Ctrl
+            if (it.isShiftActive() == true) mask = mask or 1 // Bit 0: Shift
+            if (it.isAltActive() == true) mask = mask or 2 // Bit 1: Alt
+            if (it.isCtrlActive() == true) mask = mask or 4 // Bit 2: Ctrl
             return mask
         } ?: 0
     }
 
     /**
-     * Convert a Compose Key to its character representation.
-     * Returns null if not a printable character.
+     * Convert a Compose KeyEvent to its Unicode codepoint, handling dead-key composition.
+     *
+     * Uses the Android KeyCharacterMap to handle all key layouts and shift states correctly,
+     * including keys not present in the static mapping (e.g. Key.At, non-US layouts).
+     *
+     * Dead keys (combining accents) are tracked across calls:
+     * - On a dead key, the accent is saved and 0L is returned (the key is handled but produces no
+     *   immediate output).
+     * - On the next printable key, [KeyCharacterMap.getDeadChar] combines them. If the
+     *   combination is valid, the composed character is returned. If not (e.g. ´ + z on a
+     *   layout with no ź), the pending accent is emitted first and then the base character,
+     *   so neither is lost.
+     * - A second consecutive dead key of the same type emits the spacing version of the accent
+     *   (standard terminal behaviour).
+     *
+     * @param extraShift if true, adds META_SHIFT_ON to the meta state (for sticky shift)
+     * @param stripAlt if true, also strips [AndroidKeyEvent.META_ALT_RIGHT_ON] from the KCM
+     *   lookup; left-alt is always stripped. Use when right-alt is [RightAltMode.Meta]
+     * @return the resolved codepoint(s), 0L if a dead key was buffered, or null if not handled
      */
-    private fun getCharacterFromKey(key: Key, shift: Boolean): Char? {
-        return when (key) {
-            // Letters
-            Key.A -> if (shift) 'A' else 'a'
-            Key.B -> if (shift) 'B' else 'b'
-            Key.C -> if (shift) 'C' else 'c'
-            Key.D -> if (shift) 'D' else 'd'
-            Key.E -> if (shift) 'E' else 'e'
-            Key.F -> if (shift) 'F' else 'f'
-            Key.G -> if (shift) 'G' else 'g'
-            Key.H -> if (shift) 'H' else 'h'
-            Key.I -> if (shift) 'I' else 'i'
-            Key.J -> if (shift) 'J' else 'j'
-            Key.K -> if (shift) 'K' else 'k'
-            Key.L -> if (shift) 'L' else 'l'
-            Key.M -> if (shift) 'M' else 'm'
-            Key.N -> if (shift) 'N' else 'n'
-            Key.O -> if (shift) 'O' else 'o'
-            Key.P -> if (shift) 'P' else 'p'
-            Key.Q -> if (shift) 'Q' else 'q'
-            Key.R -> if (shift) 'R' else 'r'
-            Key.S -> if (shift) 'S' else 's'
-            Key.T -> if (shift) 'T' else 't'
-            Key.U -> if (shift) 'U' else 'u'
-            Key.V -> if (shift) 'V' else 'v'
-            Key.W -> if (shift) 'W' else 'w'
-            Key.X -> if (shift) 'X' else 'x'
-            Key.Y -> if (shift) 'Y' else 'y'
-            Key.Z -> if (shift) 'Z' else 'z'
+    private fun getCodePointFromKeyEvent(
+        event: ComposeKeyEvent,
+        extraShift: Boolean = false,
+        stripAlt: Boolean = false,
+    ): Long? {
+        val nativeEvent = event.nativeKeyEvent
+        // Always strip left-alt and the shared ALT_ON bit; only strip right-alt when it is
+        // acting as Meta rather than a character selector.
+        val rightAltMask = if (stripAlt) AndroidKeyEvent.META_ALT_RIGHT_ON else 0
+        val stripMask = (
+            AndroidKeyEvent.META_CTRL_MASK or
+                AndroidKeyEvent.META_ALT_LEFT_ON or AndroidKeyEvent.META_ALT_ON or
+                rightAltMask
+            ).inv()
+        val metaState = (nativeEvent.metaState and stripMask) or
+            if (extraShift) AndroidKeyEvent.META_SHIFT_ON else 0
+        val raw = unicodeCharLookup(nativeEvent.deviceId, nativeEvent.keyCode, metaState)
 
-            // Numbers (top row)
-            Key.Zero -> if (shift) ')' else '0'
-            Key.One -> if (shift) '!' else '1'
-            Key.Two -> if (shift) '@' else '2'
-            Key.Three -> if (shift) '#' else '3'
-            Key.Four -> if (shift) '$' else '4'
-            Key.Five -> if (shift) '%' else '5'
-            Key.Six -> if (shift) '^' else '6'
-            Key.Seven -> if (shift) '&' else '7'
-            Key.Eight -> if (shift) '*' else '8'
-            Key.Nine -> if (shift) '(' else '9'
+        if (raw == 0) {
+            pendingDeadChar = 0
+            return null
+        }
 
-            // Symbols
-            Key.Spacebar -> ' '
-            Key.Minus -> if (shift) '_' else '-'
-            Key.Equals -> if (shift) '+' else '='
-            Key.LeftBracket -> if (shift) '{' else '['
-            Key.RightBracket -> if (shift) '}' else ']'
-            Key.Backslash -> if (shift) '|' else '\\'
-            Key.Semicolon -> if (shift) ':' else ';'
-            Key.Apostrophe -> if (shift) '"' else '\''
-            Key.Grave -> if (shift) '~' else '`'
-            Key.Comma -> if (shift) '<' else ','
-            Key.Period -> if (shift) '>' else '.'
-            Key.Slash -> if (shift) '?' else '/'
+        val dead = pendingDeadChar
+        val base: Int
+        if (raw and KeyCharacterMap.COMBINING_ACCENT != 0) {
+            base = raw and KeyCharacterMap.COMBINING_ACCENT_MASK
+            if (dead == 0) {
+                pendingDeadChar = base
+                return 0L
+            }
+            // No need to handle the double-combining accent here; KCM.getDeadChar does it.
+        } else {
+            base = raw
+        }
 
-            else -> null
+        pendingDeadChar = 0
+
+        if (dead != 0) {
+            val composed = KeyCharacterMap.getDeadChar(dead, base)
+            if (composed != 0) return composed.toLong()
+
+            // Combination not possible: the caller will emit `dead` first, then we return `raw`.
+            // Use bit 63 as a flag for multiple codepoints.
+            return (1L shl 63) or (dead.toLong() shl 32) or base.toLong()
+        }
+
+        return base.toLong()
+    }
+
+    /**
+     * Dispatch one or more codepoints produced by [getCodePointFromKeyEvent].
+     */
+    private fun dispatchCodePoint(codepoint: Long, dispatch: (Int) -> Unit) {
+        if (codepoint == 0L) return
+        if (codepoint < 0) {
+            // Failed dead-key combination: dispatch both characters.
+            val accent = ((codepoint ushr 32) and 0x7FFFFFFFL).toInt()
+            val base = (codepoint and 0xFFFFFFFFL).toInt()
+            dispatch(accent)
+            dispatch(base)
+        } else {
+            dispatch(codepoint.toInt())
         }
     }
 
@@ -308,66 +433,102 @@ internal class KeyboardHandler(
      * Map Compose Key to VTerm key code.
      * Returns null if not a special key.
      */
-    private fun mapToVTermKey(key: Key): Int? {
-        return when (key) {
-            // Function keys
-            Key.F1 -> VTermKey.FUNCTION_1
-            Key.F2 -> VTermKey.FUNCTION_2
-            Key.F3 -> VTermKey.FUNCTION_3
-            Key.F4 -> VTermKey.FUNCTION_4
-            Key.F5 -> VTermKey.FUNCTION_5
-            Key.F6 -> VTermKey.FUNCTION_6
-            Key.F7 -> VTermKey.FUNCTION_7
-            Key.F8 -> VTermKey.FUNCTION_8
-            Key.F9 -> VTermKey.FUNCTION_9
-            Key.F10 -> VTermKey.FUNCTION_10
-            Key.F11 -> VTermKey.FUNCTION_11
-            Key.F12 -> VTermKey.FUNCTION_12
+    private fun mapToVTermKey(key: Key): Int? = when (key) {
+        // Function keys
+        Key.F1 -> VTermKey.FUNCTION_1
 
-            // Arrow keys
-            Key.DirectionUp -> VTermKey.UP
-            Key.DirectionDown -> VTermKey.DOWN
-            Key.DirectionLeft -> VTermKey.LEFT
-            Key.DirectionRight -> VTermKey.RIGHT
+        Key.F2 -> VTermKey.FUNCTION_2
 
-            // Editing keys
-            Key.Insert -> VTermKey.INS
-            Key.Delete -> VTermKey.DEL
-            Key.Home -> VTermKey.HOME
-            Key.MoveEnd -> VTermKey.END
-            Key.PageUp -> VTermKey.PAGEUP
-            Key.PageDown -> VTermKey.PAGEDOWN
+        Key.F3 -> VTermKey.FUNCTION_3
 
-            // Special keys
-            Key.Enter -> VTermKey.ENTER
-            Key.Tab -> VTermKey.TAB
-            Key.Backspace -> VTermKey.BACKSPACE
-            Key.Escape -> VTermKey.ESCAPE
+        Key.F4 -> VTermKey.FUNCTION_4
 
-            // KP (Keypad) keys
-            Key.NumPad0 -> VTermKey.KP_0
-            Key.NumPad1 -> VTermKey.KP_1
-            Key.NumPad2 -> VTermKey.KP_2
-            Key.NumPad3 -> VTermKey.KP_3
-            Key.NumPad4 -> VTermKey.KP_4
-            Key.NumPad5 -> VTermKey.KP_5
-            Key.NumPad6 -> VTermKey.KP_6
-            Key.NumPad7 -> VTermKey.KP_7
-            Key.NumPad8 -> VTermKey.KP_8
-            Key.NumPad9 -> VTermKey.KP_9
-            Key.NumPadMultiply -> VTermKey.KP_MULT
-            Key.NumPadAdd -> VTermKey.KP_PLUS
-            Key.NumPadComma -> VTermKey.KP_COMMA
-            Key.NumPadSubtract -> VTermKey.KP_MINUS
-            Key.NumPadDot -> VTermKey.KP_PERIOD
-            Key.NumPadDivide -> VTermKey.KP_DIVIDE
-            Key.NumPadEnter -> VTermKey.KP_ENTER
-            Key.NumPadEquals -> VTermKey.KP_EQUAL
+        Key.F5 -> VTermKey.FUNCTION_5
 
-            else -> null
-        }
+        Key.F6 -> VTermKey.FUNCTION_6
+
+        Key.F7 -> VTermKey.FUNCTION_7
+
+        Key.F8 -> VTermKey.FUNCTION_8
+
+        Key.F9 -> VTermKey.FUNCTION_9
+
+        Key.F10 -> VTermKey.FUNCTION_10
+
+        Key.F11 -> VTermKey.FUNCTION_11
+
+        Key.F12 -> VTermKey.FUNCTION_12
+
+        // Arrow keys
+        Key.DirectionUp -> VTermKey.UP
+
+        Key.DirectionDown -> VTermKey.DOWN
+
+        Key.DirectionLeft -> VTermKey.LEFT
+
+        Key.DirectionRight -> VTermKey.RIGHT
+
+        // Editing keys
+        Key.Insert -> VTermKey.INS
+
+        Key.Delete -> VTermKey.DEL
+
+        Key.MoveHome -> VTermKey.HOME
+
+        Key.MoveEnd -> VTermKey.END
+
+        Key.PageUp -> VTermKey.PAGEUP
+
+        Key.PageDown -> VTermKey.PAGEDOWN
+
+        // Special keys
+        Key.Enter -> VTermKey.ENTER
+
+        Key.Tab -> VTermKey.TAB
+
+        Key.Backspace -> VTermKey.BACKSPACE
+
+        Key.Escape -> VTermKey.ESCAPE
+
+        // KP (Keypad) keys
+        Key.NumPad0 -> VTermKey.KP_0
+
+        Key.NumPad1 -> VTermKey.KP_1
+
+        Key.NumPad2 -> VTermKey.KP_2
+
+        Key.NumPad3 -> VTermKey.KP_3
+
+        Key.NumPad4 -> VTermKey.KP_4
+
+        Key.NumPad5 -> VTermKey.KP_5
+
+        Key.NumPad6 -> VTermKey.KP_6
+
+        Key.NumPad7 -> VTermKey.KP_7
+
+        Key.NumPad8 -> VTermKey.KP_8
+
+        Key.NumPad9 -> VTermKey.KP_9
+
+        Key.NumPadMultiply -> VTermKey.KP_MULT
+
+        Key.NumPadAdd -> VTermKey.KP_PLUS
+
+        Key.NumPadComma -> VTermKey.KP_COMMA
+
+        Key.NumPadSubtract -> VTermKey.KP_MINUS
+
+        Key.NumPadDot -> VTermKey.KP_PERIOD
+
+        Key.NumPadDivide -> VTermKey.KP_DIVIDE
+
+        Key.NumPadEnter -> VTermKey.KP_ENTER
+
+        Key.NumPadEquals -> VTermKey.KP_EQUAL
+
+        else -> null
     }
-
 }
 
 /**
