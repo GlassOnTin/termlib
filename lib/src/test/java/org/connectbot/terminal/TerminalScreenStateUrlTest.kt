@@ -246,4 +246,218 @@ class TerminalScreenStateUrlTest {
             state.getHyperlinkUrlAt(row = 0, col = 12),
         )
     }
+
+    // ------------------------------------------------------------------
+    // TDD spec: anchor-based continuation across formatting prefixes.
+    //
+    // These tests describe the behaviour requested by the Haven maintainer
+    // for URLs that appear in tool output (Claude Code transcripts,
+    // markdown tables, piped indented logs). The current implementation
+    // does NOT pass all of these; they are the target spec.
+    //
+    // Core rules:
+    //   1. A `https://` / `http://` / `ftp://` anchor on any row starts
+    //      URL collection.
+    //   2. On a continuation row, strip any leading run of whitespace OR
+    //      formatting characters (box-drawing, markdown-table pipes, list
+    //      markers, etc.) before deciding continuation.
+    //   3. After stripping, if the row begins with a URL-safe char and
+    //      the URL-safe run contains at least one `/`, it counts as a
+    //      continuation of the previous row's URL.
+    //   4. A mid-row whitespace run INSIDE what would otherwise be a URL
+    //      ends the URL at the whitespace (tool padding, not real URL).
+    //   5. Three consecutive non-continuation rows after an anchor
+    //      confirms the URL has ended and we should stop walking.
+    //
+    // Naming convention: prefix every case with `spec_` so it's obvious
+    // which belong to the new spec vs the legacy cases above.
+    // ------------------------------------------------------------------
+
+    // ---- Rule 1 + 2: leading whitespace on the continuation row ----
+
+    @Test
+    fun `spec_continuation_leading_whitespace_with_slash`() {
+        // bash command wrapped by Claude Code's renderer. Row 1 starts with
+        // spaces (Claude Code's alignment padding) then /path.
+        val state = screenState(
+            80,
+            "curl -s \"https://gitlab.com/api/v4/projects/fdroid%2Ffdroiddata",
+            "      /merge_requests/36819\" 2>&1 | python3 -c ...",
+        )
+        val url = state.getHyperlinkUrlAt(row = 0, col = 20) // inside URL
+        assertEquals(
+            "https://gitlab.com/api/v4/projects/fdroid%2Ffdroiddata/merge_requests/36819",
+            url,
+        )
+    }
+
+    @Test
+    fun `spec_continuation_from_tap_on_continuation_row`() {
+        // Same URL as above but user taps on row 1 (the continuation).
+        val state = screenState(
+            80,
+            "curl -s \"https://gitlab.com/api/v4/projects/fdroid%2Ffdroiddata",
+            "      /merge_requests/36819\" 2>&1 | python3 -c ...",
+        )
+        val url = state.getHyperlinkUrlAt(row = 1, col = 10) // inside "/merge_req..."
+        assertEquals(
+            "https://gitlab.com/api/v4/projects/fdroid%2Ffdroiddata/merge_requests/36819",
+            url,
+        )
+    }
+
+    // ---- Rule 2: leading box-drawing / formatting chars ----
+
+    @Test
+    fun `spec_continuation_leading_box_drawing_char`() {
+        // Claude Code's "⎿  " prefix on a continuation line (U+23BF).
+        // The prefix should be stripped before the continuation check.
+        val state = screenState(
+            80,
+            "● Bash(curl https://example.com/api/v1/projects/very-long-name-here",
+            "  ⎿  /subpath/result.json)",
+        )
+        assertEquals(
+            "https://example.com/api/v1/projects/very-long-name-here/subpath/result.json",
+            state.getHyperlinkUrlAt(row = 0, col = 20),
+        )
+    }
+
+    @Test
+    fun `spec_continuation_leading_pipe_and_tee`() {
+        // Markdown / table-drawing prefixes. `│` and `├` at row start.
+        val state = screenState(
+            80,
+            "│ Endpoint: https://api.example.com/orgs/haven/projects/termlib",
+            "│           /issues/78",
+        )
+        assertEquals(
+            "https://api.example.com/orgs/haven/projects/termlib/issues/78",
+            state.getHyperlinkUrlAt(row = 0, col = 25),
+        )
+    }
+
+    // ---- Rule 3: markdown table column ----
+
+    @Test
+    fun `spec_continuation_markdown_table_column`() {
+        // | col1 | https://very-long.example.com/a | col3 |
+        // | cont | /path/more-stuff                | end  |
+        // Tap inside the URL on row 0 should follow into the /path/more-stuff
+        // cell on row 1 — same column, continuation with `/`.
+        val state = screenState(
+            80,
+            "| col1 | https://very-long.example.com/a       | col3 |",
+            "| cont | /path/more-stuff                      | end  |",
+        )
+        assertEquals(
+            "https://very-long.example.com/a/path/more-stuff",
+            state.getHyperlinkUrlAt(row = 0, col = 20),
+        )
+    }
+
+    // ---- Rule 4: mid-row whitespace ends the URL ----
+
+    @Test
+    fun `spec_mid_row_whitespace_ends_url`() {
+        // Tool concatenates two tokens with spaces between them on the
+        // SAME row. The URL must end at the first space, not get joined
+        // with the trailing text on the same row.
+        val state = screenState(
+            80,
+            "see https://example.com/path   unrelated prose here",
+        )
+        assertEquals(
+            "https://example.com/path",
+            state.getHyperlinkUrlAt(row = 0, col = 10),
+        )
+    }
+
+    // ---- Rule 5: three non-continuation rows terminate the walk ----
+
+    @Test
+    fun `spec_terminate_after_three_prose_rows`() {
+        // Anchor on row 0; row 1-3 are prose rows that each strip down to
+        // non-URL content (no `/`, no URL-safe prefix after stripping).
+        // Walker must stop at row 0; tap on row 0 returns just the URL.
+        val state = screenState(
+            80,
+            "prefix https://example.com/path",
+            "This is a normal sentence of prose.",
+            "Another ordinary line follows.",
+            "Third prose line, no URL continuation.",
+        )
+        assertEquals(
+            "https://example.com/path",
+            state.getHyperlinkUrlAt(row = 0, col = 12),
+        )
+    }
+
+    // ---- Rule 3: `/` alone on continuation row is a strong signal ----
+
+    @Test
+    fun `spec_lone_slash_path_is_continuation`() {
+        // A row that, after stripping formatting, starts with `/` and contains
+        // only URL-safe chars is almost certainly a URL continuation even if
+        // the previous row didn't perfectly fill the column width.
+        val state = screenState(
+            80,
+            "Visit https://example.com/very-long",
+            "        /subpath",
+        )
+        assertEquals(
+            "https://example.com/very-long/subpath",
+            state.getHyperlinkUrlAt(row = 0, col = 10),
+        )
+    }
+
+    // ---- Guard against greedy absorption ----
+
+    @Test
+    fun `spec_continuation_row_with_space_in_middle_is_rejected`() {
+        // Row 1 starts with /path but has a space mid-content — that's
+        // prose, not a URL continuation.
+        val state = screenState(
+            80,
+            "Visit https://example.com/a",
+            "        /subpath of prose",
+        )
+        // Should include /subpath (first URL-safe run after prefix strip)
+        // but stop at the space before "of". Open question: should we
+        // join /subpath at all, given the trailing prose on the same row?
+        // Proposed: yes, join up to the space.
+        assertEquals(
+            "https://example.com/a/subpath",
+            state.getHyperlinkUrlAt(row = 0, col = 10),
+        )
+    }
+
+    @Test
+    fun `spec_tap_before_anchor_returns_null`() {
+        // Tap on a row that does not contain a URL anchor and is not a
+        // continuation of one. No URL should be returned.
+        val state = screenState(
+            80,
+            "Just some prose.",
+            "More prose here.",
+        )
+        assertNull(state.getHyperlinkUrlAt(row = 0, col = 5))
+    }
+
+    // ---- Legacy continuation cases still pass under the new spec ----
+
+    @Test
+    fun `spec_legacy_column_boundary_wrap_still_works`() {
+        // Regression: same case as the legacy `url wrapped at column
+        // boundary is joined across rows` test, pinned here as a guard
+        // against the new spec accidentally regressing the simple case.
+        // 40-col terminal, URL exactly fills row 0, tail on row 1 at col 0.
+        val row0 = "https://example.com/very/long/path/xxxx" // 40 chars
+        val row1 = "yyyy/zzzz"
+        val state = screenState(40, row0, row1)
+        assertEquals(
+            "https://example.com/very/long/path/xxxxyyyy/zzzz",
+            state.getHyperlinkUrlAt(row = 0, col = 10),
+        )
+    }
 }

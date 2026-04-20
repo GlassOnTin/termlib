@@ -137,6 +137,15 @@ internal class TerminalScreenState(
         }?.metadata
         if (osc8 != null) return osc8
 
+        // 2D blob detector runs first — it handles structural-column-bounded
+        // URLs (markdown tables, box-drawn panels) and continuation rows with
+        // formatting prefixes (⎿, │, leading indentation). The blob may
+        // extend a URL that the single-line match would truncate, so it must
+        // get first look. Falls through to the legacy walker / single-line
+        // fallback below if the blob approach can't anchor a URL at the tap.
+        val blobUrl = UrlBlobDetector(this).detect(row, col)
+        if (blobUrl != null) return blobUrl
+
         // Single-line fast path: if a regex match doesn't touch either edge
         // of the trimmed line text, no continuation logic is needed.
         val singleHit = line.autoDetectedUrls.firstOrNull { col >= it.first && col < it.second }

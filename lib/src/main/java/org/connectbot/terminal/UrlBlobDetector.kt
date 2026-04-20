@@ -1,0 +1,364 @@
+/*
+ * ConnectBot Terminal
+ * Copyright 2026 Kenny Root
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ */
+package org.connectbot.terminal
+
+/**
+ * Resolves the URL (if any) that covers a tapped cell by treating the terminal
+ * screen as a 2D grid and the URL as a **convex, closed** blob of URL-safe
+ * cells that is *anchored* on an explicit scheme match (`https://`, `http://`,
+ * `ftp://`). Without an anchor the detector refuses to return anything —
+ * protecting against false positives where a tap on generic prose would
+ * otherwise get turned into a URL by concatenation-through-whitespace.
+ *
+ * Algorithm:
+ *
+ * 1. Locate the anchor scheme `https://`/`http://`/`ftp://` inside the same
+ *    logical wrapped region as the tap (current row + adjacent rows that
+ *    pass the continuation test).
+ *
+ * 2. Mark structural columns over the visible snapshot: non-URL-safe,
+ *    non-whitespace chars that appear at the same column on ≥ 2 adjacent
+ *    rows. `│`, `├`, `|`, `+` frames get flagged naturally.
+ *
+ * 3. Starting at the anchor, walk forward row by row. On each row collect
+ *    the URL-safe run. Cross a row boundary only when the next row starts,
+ *    after stripping leading whitespace + single-row formatting chars
+ *    (non-URL-safe-non-structural) + structural cells, with a URL-safe run
+ *    containing `/`.
+ *
+ * 4. For each row the blob touches, check convex-closedness: the span from
+ *    leftmost to rightmost URL-safe cell must contain only URL-safe,
+ *    structural, or narrow bridged-whitespace cells — no terminator chars
+ *    inside the span.
+ *
+ * 5. Reconstruct the URL text by reading blob cells in row-major order,
+ *    skipping structural cells and collapsing bridged whitespace runs. Match
+ *    against [TerminalLine.URL_REGEX]; the match covering the tap's offset
+ *    is the result.
+ *
+ * Intentional non-goals:
+ * - No mid-row horizontal whitespace bridging (tool-padding on the same row
+ *   terminates the URL — less ambitious than the spec doc's optional rule).
+ * - No anchor-less detection; plain-text tokens that happen to be URL-shaped
+ *   fall back to the caller's single-line autoDetectedUrls path.
+ */
+internal class UrlBlobDetector(private val state: TerminalScreenState) {
+
+    private val snapshot get() = state.snapshot
+    private val rows = snapshot.rows
+    private val cols = snapshot.cols
+
+    private val cellChar = Array(rows) { r ->
+        CharArray(cols) { c -> snapshot.lines.getOrNull(r)?.cells?.getOrNull(c)?.char ?: ' ' }
+    }
+
+    private val structural: Array<BooleanArray> by lazy { computeStructural() }
+
+    /** Entry point. Returns the full URL covering the tap, or null. */
+    fun detect(tapRow: Int, tapCol: Int): String? {
+        if (tapRow !in 0 until rows || tapCol !in 0 until cols) return null
+        if (!cellChar[tapRow][tapCol].isBlobUrlSafe()) return null
+
+        // Find the anchor row: walk upward from tapRow looking for a row
+        // whose stripped text contains "https://" etc. At most a few rows
+        // back — URL wraps rarely span more than that.
+        var anchorRow = -1
+        var anchorStartCol = -1
+        for (r in tapRow downTo maxOf(0, tapRow - MAX_UPWARD_ROWS)) {
+            val (found, startCol) = findAnchorInRow(r)
+            if (found) {
+                anchorRow = r
+                anchorStartCol = startCol
+                break
+            }
+            // Upward walk stops once we've searched enough rows back.
+        }
+        if (anchorRow < 0) return null
+
+        // Walk forward from anchorRow collecting rows that continue the blob.
+        // Each continuation returns its start column — either the
+        // same-column-as-anchor content (frame wrap) or the first URL-safe
+        // col after prefix strip.  We accumulate (row, startCol) pairs so
+        // the rowSpans computation below doesn't have to re-derive start.
+        val rowStarts = mutableMapOf(anchorRow to anchorStartCol)
+        val touchedRows = mutableListOf(anchorRow)
+        var lastRow = anchorRow
+        while (lastRow < rows - 1) {
+            val nextStart = continuationStartCol(
+                anchorRow = anchorRow,
+                anchorStartCol = anchorStartCol,
+                prevRow = lastRow,
+                curRow = lastRow + 1,
+            ) ?: break
+            lastRow++
+            touchedRows.add(lastRow)
+            rowStarts[lastRow] = nextStart
+        }
+        if (tapRow !in touchedRows) return null
+
+        // Compute per-row spans from the collected starts.
+        val rowSpans = mutableMapOf<Int, IntRange>()
+        for (r in touchedRows) {
+            val start = rowStarts[r] ?: continue
+            val end = findUrlSafeRunEnd(r, start) ?: continue
+            rowSpans[r] = start..end
+        }
+        if (tapRow !in rowSpans) return null
+
+        // Convex-closed: each row's span must contain only URL-safe,
+        // structural, or narrow bridged-whitespace cells.
+        val validRows = rowSpans.filter { (r, span) -> isSpanConvexClosed(r, span) }
+        if (tapRow !in validRows) return null
+        // Tap must lie inside its row's span — guards against taps on prose
+        // before or after the URL on the same row.
+        if (tapCol !in validRows[tapRow]!!) return null
+
+        // Keep only rows that are contiguous with the anchor row.
+        val ordered = validRows.keys.sorted()
+        val contiguous = ordered.filter { r -> r == anchorRow || r in anchorRow..(anchorRow + ordered.size) }
+            .takeWhile { it - (validRows.keys.min()) <= touchedRows.size }
+        // Simpler: just keep rows [anchorRow..lastContiguousValid].
+        val kept = buildList {
+            add(anchorRow)
+            var prev = anchorRow
+            for (r in ordered) {
+                if (r <= anchorRow) continue
+                if (r - prev > 1) break
+                if (r !in validRows) break
+                add(r)
+                prev = r
+            }
+        }
+        if (tapRow !in kept) return null
+
+        // Reconstruct
+        val sb = StringBuilder()
+        var tapOffset = 0
+        for (r in kept) {
+            val span = validRows[r]!!
+            if (r == tapRow) {
+                tapOffset = sb.length + offsetWithinRow(r, span, tapCol)
+            }
+            sb.append(readRowSpan(r, span))
+        }
+
+        val full = sb.toString()
+        val match = TerminalLine.URL_REGEX.findAll(full).firstOrNull { m ->
+            tapOffset in m.range
+        }
+        return match?.value
+    }
+
+    // ------------------------------------------------------------------
+    // Structural column detection
+    // ------------------------------------------------------------------
+
+    private fun computeStructural(): Array<BooleanArray> {
+        val mask = Array(rows) { BooleanArray(cols) }
+        for (c in 0 until cols) {
+            var r = 0
+            while (r < rows) {
+                val ch = cellChar[r][c]
+                if (ch.isBlobUrlSafe() || ch.isWhitespace()) { r++; continue }
+                var runEnd = r
+                while (runEnd + 1 < rows && cellChar[runEnd + 1][c] == ch) runEnd++
+                if (runEnd - r >= 1) {
+                    for (rr in r..runEnd) mask[rr][c] = true
+                }
+                r = runEnd + 1
+            }
+        }
+        return mask
+    }
+
+    // ------------------------------------------------------------------
+    // Row-level helpers
+    // ------------------------------------------------------------------
+
+    private fun findAnchorInRow(r: Int): Pair<Boolean, Int> {
+        val rowText = rowAsString(r)
+        for (scheme in ANCHORS) {
+            val idx = rowText.indexOf(scheme)
+            if (idx >= 0) return true to idx
+        }
+        return false to -1
+    }
+
+    private fun rowAsString(r: Int): String = String(cellChar[r])
+
+    /**
+     * Row r+1 is a continuation of row r iff after stripping row r+1's
+     * leading run of whitespace / structural / single-row non-URL-safe
+     * formatting chars, the remaining content starts with a URL-safe
+     * character and the first URL-safe run contains `/`.
+     *
+     * Row r must end with a URL-safe trailing token (before terminal-pad
+     * trailing whitespace).
+     */
+    /**
+     * Whether `curRow` logically continues a URL that starts at
+     * (`anchorRow`, `anchorStartCol`) and passes through `prevRow`.
+     *
+     * Continuation accepted when the previous row's URL-safe run (starting
+     * from the anchor col if prevRow == anchorRow, else the first URL-safe
+     * col after prefix stripping) ends in one of three geometries:
+     *
+     *  - **Margin wrap** — URL-safe run reaches the last column of the row
+     *    (`cols - 1`).  The terminal hard-wrapped the URL.  The
+     *    continuation row's URL-safe content is accepted unconditionally.
+     *
+     *  - **Frame wrap** — URL-safe run ends before a structural column.
+     *    The URL is inside a markdown table / box-drawn panel that frames
+     *    it; the next row continues within the same frame.  The
+     *    continuation row's first URL-safe run must contain `/`.
+     *
+     *  - **Short-row wrap** — URL-safe run ends in trailing whitespace
+     *    (no structural frame).  The continuation row's first URL-safe
+     *    run must contain `/` (strong URL signal to accept the join).
+     */
+    /**
+     * Returns the column on `curRow` at which the URL continues (if it does),
+     * or null if `curRow` is not a continuation of the URL starting at
+     * (`anchorRow`, `anchorStartCol`) that passes through `prevRow`.
+     */
+    private fun continuationStartCol(
+        anchorRow: Int,
+        anchorStartCol: Int,
+        prevRow: Int,
+        curRow: Int,
+    ): Int? {
+        if (prevRow < 0 || curRow >= rows) return null
+
+        val prevUrlStart = if (prevRow == anchorRow) anchorStartCol
+                           else firstUrlSafeColAfterPrefix(prevRow) ?: return null
+        val prevUrlEnd = findUrlSafeRunEnd(prevRow, prevUrlStart) ?: return null
+        if (!cellChar[prevRow][prevUrlEnd].isBlobUrlSafe()) return null
+
+        // Frame bounds on prevRow: leftmost structural col strictly < anchor,
+        // rightmost structural col strictly > prevUrlEnd (reached via whitespace).
+        val leftFrame = (0 until prevUrlStart).lastOrNull { structural[prevRow][it] } ?: -1
+        var scan = prevUrlEnd + 1
+        while (scan < cols && cellChar[prevRow][scan].isWhitespace()) scan++
+        val rightFrame = if (scan < cols && structural[prevRow][scan]) scan else cols
+
+        // Where to look for the continuation's start col.
+        val curStart = if (leftFrame >= 0 || rightFrame < cols) {
+            firstUrlSafeColInRange(curRow, leftFrame + 1, rightFrame) ?: return null
+        } else {
+            firstUrlSafeColAfterPrefix(curRow) ?: return null
+        }
+
+        // Margin wrap — continuation accepted with no slash requirement.
+        if (prevUrlEnd == cols - 1) return curStart
+
+        // Slash-on-continuation signal required for the non-margin cases.
+        var sawSlash = false
+        var c = curStart
+        while (c < cols && cellChar[curRow][c].isBlobUrlSafe()) {
+            if (cellChar[curRow][c] == '/') { sawSlash = true; break }
+            c++
+        }
+        if (!sawSlash) return null
+
+        return curStart
+    }
+
+    /** Like [firstUrlSafeColAfterPrefix] but restricted to the half-open column range [start, end). */
+    private fun firstUrlSafeColInRange(r: Int, start: Int, end: Int): Int? {
+        val lo = start.coerceAtLeast(0)
+        val hi = end.coerceAtMost(cols)
+        for (c in lo until hi) {
+            val ch = cellChar[r][c]
+            if (ch.isWhitespace()) continue
+            if (structural[r][c]) continue
+            if (!ch.isBlobUrlSafe()) continue      // single-row formatting
+            return c
+        }
+        return null
+    }
+
+    /**
+     * Skip leading whitespace + structural + single-row non-URL-safe
+     * formatting chars on row `r`, returning the first URL-safe column,
+     * or null if nothing URL-safe follows.
+     */
+    private fun firstUrlSafeColAfterPrefix(r: Int): Int? {
+        for (c in 0 until cols) {
+            val ch = cellChar[r][c]
+            if (ch.isWhitespace()) continue
+            if (structural[r][c]) continue
+            if (!ch.isBlobUrlSafe()) continue          // single-row formatting (⎿, ●, etc.)
+            return c
+        }
+        return null
+    }
+
+    private fun findUrlSafeRunEnd(r: Int, start: Int): Int? {
+        var c = start
+        var last = -1
+        while (c < cols) {
+            val ch = cellChar[r][c]
+            if (ch.isBlobUrlSafe()) {
+                last = c
+                c++
+                continue
+            }
+            // Structural columns count as pass-through for span computation;
+            // the URL-safe run can resume after them.
+            if (structural[r][c]) { c++; continue }
+            break
+        }
+        return if (last >= start) last else null
+    }
+
+    private fun isSpanConvexClosed(r: Int, span: IntRange): Boolean {
+        var c = span.first
+        while (c <= span.last) {
+            val ch = cellChar[r][c]
+            if (ch.isBlobUrlSafe() || structural[r][c]) { c++; continue }
+            return false     // terminator / mid-row whitespace inside the hull
+        }
+        return true
+    }
+
+    private fun readRowSpan(r: Int, span: IntRange): String {
+        val sb = StringBuilder()
+        for (c in span) {
+            if (structural[r][c]) continue
+            val ch = cellChar[r][c]
+            if (ch.isBlobUrlSafe()) sb.append(ch)
+        }
+        return sb.toString()
+    }
+
+    private fun offsetWithinRow(r: Int, span: IntRange, tapCol: Int): Int {
+        if (tapCol < span.first) return 0
+        var offset = 0
+        var c = span.first
+        while (c < tapCol && c <= span.last) {
+            if (!structural[r][c] && cellChar[r][c].isBlobUrlSafe()) offset++
+            c++
+        }
+        return offset
+    }
+
+    /**
+     * Blob-local URL-safeness: like [Char.isUrlSafe] but excludes balanced-
+     * punctuation characters that tool output wraps around URLs — `(` `)`
+     * `[` `]` `{` `}`. Within the blob detector we prefer to treat these
+     * as terminators even though [TerminalLine.URL_REGEX] allows them
+     * through, because log output like "Bash(curl URL)" is much more
+     * common than Wikipedia-style URLs containing balanced parens.
+     */
+    private fun Char.isBlobUrlSafe(): Boolean =
+        isLetterOrDigit() || this in "/:@!$&'*+,;=-._~%?#"
+
+    companion object {
+        private val ANCHORS = listOf("https://", "http://", "ftp://")
+        private const val MAX_UPWARD_ROWS = 4
+    }
+}
