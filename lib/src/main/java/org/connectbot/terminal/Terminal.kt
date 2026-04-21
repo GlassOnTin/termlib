@@ -1747,7 +1747,9 @@ internal fun TerminalWithAccessibility(
                         this.rawKeyboardMode = rawKeyboardMode
                         // Set up key event handling
                         setOnKeyListener { _, _, event ->
-                            if (event.action == android.view.KeyEvent.ACTION_DOWN) {
+                            if (event.action == android.view.KeyEvent.ACTION_DOWN &&
+                                ImeInputView.shouldResetImeBufferOnKey(event.keyCode)
+                            ) {
                                 resetImeBuffer()
                             }
                             keyboardHandler.onKeyEvent(

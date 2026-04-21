@@ -239,6 +239,55 @@ class ImeInputViewTest {
         assertTrue(updates.any { it.view === view && it.selStart == 0 && it.selEnd == 0 && it.candidatesStart == -1 && it.candidatesEnd == -1 })
     }
 
+    // === Physical-keyboard reset policy (issue #99 follow-up) ===
+
+    @Test
+    fun testShouldResetImeBufferOnKey_commandBoundaries() {
+        // Enter and Escape end or interrupt the current shell line, so the IME
+        // can safely forget its tracked prefix and start the next command fresh.
+        assertTrue(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_ENTER))
+        assertTrue(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_NUMPAD_ENTER))
+        assertTrue(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_ESCAPE))
+    }
+
+    @Test
+    fun testShouldResetImeBufferOnKey_textAndModifiersDoNotReset() {
+        // Heart of the #99 follow-up: pressing Shift or typing a capital on a
+        // physical keyboard must not wipe Gboard's tracked context for
+        // subsequent soft-keyboard autocorrect.
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_SHIFT_LEFT))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_SHIFT_RIGHT))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_CTRL_LEFT))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_CTRL_RIGHT))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_ALT_LEFT))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_META_LEFT))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_CAPS_LOCK))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_A))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_Z))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_0))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_SPACE))
+    }
+
+    @Test
+    fun testShouldResetImeBufferOnKey_navigationDoesNotReset() {
+        // Cursor movement, backspace, Tab, and function keys either don't
+        // produce text (nav) or aren't meaningful command boundaries (Tab,
+        // Fn). Leaving them alone keeps the IME's context intact across
+        // brief physical-keyboard interjections.
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_DPAD_LEFT))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_DPAD_RIGHT))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_DPAD_UP))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_DPAD_DOWN))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_DEL))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_FORWARD_DEL))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_TAB))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_F1))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_F12))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_HOME))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_MOVE_END))
+        assertFalse(ImeInputView.shouldResetImeBufferOnKey(KeyEvent.KEYCODE_PAGE_UP))
+    }
+
     // === IME duplicate character tests (connectbot/connectbot#1955) ===
 
     private fun createKeyboardOutputCapture(): Pair<InputConnection, MutableList<ByteArray>> {
@@ -400,7 +449,11 @@ class ImeInputViewTest {
         InstrumentationRegistry.getInstrumentation().runOnMainSync {
             view = ImeInputView(context, handler).also { v ->
                 v.setOnKeyListener { _, _, event ->
-                    if (event.action == KeyEvent.ACTION_DOWN) v.resetImeBuffer()
+                    if (event.action == KeyEvent.ACTION_DOWN &&
+                        ImeInputView.shouldResetImeBufferOnKey(event.keyCode)
+                    ) {
+                        v.resetImeBuffer()
+                    }
                     handler.onKeyEvent(androidx.compose.ui.input.key.KeyEvent(event))
                 }
                 ic = v.onCreateInputConnection(EditorInfo())
@@ -461,7 +514,11 @@ class ImeInputViewTest {
         InstrumentationRegistry.getInstrumentation().runOnMainSync {
             view = ImeInputView(context, handler).also { v ->
                 v.setOnKeyListener { _, _, event ->
-                    if (event.action == KeyEvent.ACTION_DOWN) v.resetImeBuffer()
+                    if (event.action == KeyEvent.ACTION_DOWN &&
+                        ImeInputView.shouldResetImeBufferOnKey(event.keyCode)
+                    ) {
+                        v.resetImeBuffer()
+                    }
                     handler.onKeyEvent(androidx.compose.ui.input.key.KeyEvent(event))
                 }
                 v.onCreateInputConnection(EditorInfo())
@@ -559,7 +616,11 @@ class ImeInputViewTest {
         InstrumentationRegistry.getInstrumentation().runOnMainSync {
             ImeInputView(context, handler).also { v ->
                 v.setOnKeyListener { _, _, event ->
-                    if (event.action == KeyEvent.ACTION_DOWN) v.resetImeBuffer()
+                    if (event.action == KeyEvent.ACTION_DOWN &&
+                        ImeInputView.shouldResetImeBufferOnKey(event.keyCode)
+                    ) {
+                        v.resetImeBuffer()
+                    }
                     handler.onKeyEvent(androidx.compose.ui.input.key.KeyEvent(event))
                 }
                 ic = v.onCreateInputConnection(EditorInfo())

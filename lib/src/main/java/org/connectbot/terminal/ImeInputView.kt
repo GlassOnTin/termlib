@@ -651,7 +651,37 @@ internal class ImeInputView(
         }
     }
 
-    private companion object {
+    internal companion object {
+        /**
+         * Whether a hardware-keyboard key press should wipe the IME's tracked
+         * buffer before the terminal processes the event.
+         *
+         * Called from the enclosing composable's setOnKeyListener. Physical
+         * keys that produce text (letters, digits, symbols) or navigate
+         * (arrows, backspace, Tab, function keys) deliberately do NOT trigger
+         * a reset — the previous blanket reset-on-ACTION_DOWN policy wiped
+         * the IME's context mid-word, so a single Shift+A on a physical
+         * keyboard would lose Gboard's autocorrect state for everything
+         * typed on the soft keyboard before that (#99 follow-up).
+         *
+         * Cross-modality autocorrect is inherently imperfect — physical-key
+         * text bypasses the Editable, so the IME can't track it either way —
+         * so leaving the IME's state alone for ordinary keys is at least as
+         * good as clearing, and strictly better for the common case where a
+         * user inserts a capital letter with Shift while mostly typing on
+         * the soft keyboard.
+         *
+         * Reset fires only on keys that semantically clear or interrupt the
+         * current shell line — Enter / Escape — so the IME starts the next
+         * command context fresh.
+         */
+        fun shouldResetImeBufferOnKey(keyCode: Int): Boolean = when (keyCode) {
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER,
+            KeyEvent.KEYCODE_ESCAPE -> true
+            else -> false
+        }
+
         /**
          * Upper bound on `deleteSurroundingText.leftLength`. Real IMEs request
          * at most a few chars at a time; this cap protects against a runaway
