@@ -1719,19 +1719,18 @@ internal fun TerminalWithAccessibility(
                             }
                         }
                     }
-                    FloatingActionButton(
-                        onClick = {
-                            val text = clipboardManager.getText()?.text
-                            if (!text.isNullOrEmpty()) {
+                    if (onPasteRequest != null) {
+                        FloatingActionButton(
+                            onClick = {
                                 selectionManager.clearSelection()
-                                terminalEmulator.writeInput(text.toByteArray())
-                            }
-                        },
-                        modifier = Modifier.size(COPY_BUTTON_SIZE),
-                        containerColor = Color.White,
-                        contentColor = Color.Black
-                    ) {
-                        Text("Paste", style = MaterialTheme.typography.labelSmall)
+                                onPasteRequest()
+                            },
+                            modifier = Modifier.size(COPY_BUTTON_SIZE),
+                            containerColor = Color.White,
+                            contentColor = Color.Black
+                        ) {
+                            Text("Paste", style = MaterialTheme.typography.labelSmall)
+                        }
                     }
                 }
             }
