@@ -260,17 +260,25 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
             firstUrlSafeColAfterPrefix(curRow) ?: return null
         }
 
-        // Margin wrap — continuation accepted with no slash requirement.
+        // Margin wrap — continuation accepted with no structural-char
+        // requirement.
         if (prevUrlEnd == cols - 1) return curStart
 
-        // Slash-on-continuation signal required for the non-margin cases.
-        var sawSlash = false
+        // URL-structural signal required for the non-margin cases: the
+        // continuation's first URL-safe run must contain any of `/#?&=` —
+        // i.e. a path separator, fragment marker, or query structure. Any
+        // of those is strong evidence the row continues a URL rather than
+        // natural prose (which essentially never contains these runs of
+        // URL-safe glyphs). Required because wrap targets like
+        // `.../issues/106#issuecomment-1234` land their fragment on the
+        // continuation row with no `/` of its own.
+        var sawStructural = false
         var c = curStart
         while (c < cols && cellChar[curRow][c].isBlobUrlSafe()) {
-            if (cellChar[curRow][c] == '/') { sawSlash = true; break }
+            if (cellChar[curRow][c] in "/#?&=") { sawStructural = true; break }
             c++
         }
-        if (!sawSlash) return null
+        if (!sawStructural) return null
 
         return curStart
     }

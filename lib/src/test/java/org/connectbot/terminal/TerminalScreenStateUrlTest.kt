@@ -393,7 +393,39 @@ class TerminalScreenStateUrlTest {
         )
     }
 
-    // ---- Rule 3: `/` alone on continuation row is a strong signal ----
+    // ---- Rule 3: URL-structural chars on continuation row ----
+
+    @Test
+    fun `spec_fragment_anchor_on_continuation_row`() {
+        // Real-world case from a GitHub issue-comment URL where the
+        // continuation row carries the #fragment (no / of its own). The
+        // continuation rule accepts /, #, ?, &, or = as URL-structural
+        // evidence.
+        val state = screenState(
+            80,
+            "  ⎿ https://github.com/GlassHaven/Haven/issues/",
+            "    106#issuecomment-4298664962",
+        )
+        assertEquals(
+            "https://github.com/GlassHaven/Haven/issues/106#issuecomment-4298664962",
+            state.getHyperlinkUrlAt(row = 0, col = 15),
+        )
+    }
+
+    @Test
+    fun `spec_query_string_on_continuation_row`() {
+        // Same relaxation covers `?foo=bar&baz=qux` wraps — the query-string
+        // structure is strong evidence the row continues a URL.
+        val state = screenState(
+            80,
+            "See https://search.example.com/results",
+            "        ?q=terminal&limit=50",
+        )
+        assertEquals(
+            "https://search.example.com/results?q=terminal&limit=50",
+            state.getHyperlinkUrlAt(row = 0, col = 10),
+        )
+    }
 
     @Test
     fun `spec_lone_slash_path_is_continuation`() {
