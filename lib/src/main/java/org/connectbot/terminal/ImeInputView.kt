@@ -211,8 +211,21 @@ internal class ImeInputView(
             // methods — Japanese, Chinese, Korean). TYPE_TEXT_FLAG_NO_SUGGESTIONS
             // suppresses autocomplete/prediction while keeping the composition
             // protocol active. See #96.
+            //
+            // TYPE_TEXT_FLAG_AUTO_CORRECT is set deliberately *alongside*
+            // NO_SUGGESTIONS — they're contradictory by spec, but in
+            // practice Samsung Keyboard (InputMethodManager_LC on
+            // Galaxy S series, Android 16) gates input on AUTO_CORRECT
+            // being present. Without it, Samsung's framework logs
+            // `ssi() view is not EditText` and silently drops every
+            // commitText, so the user can press keys but nothing
+            // reaches the terminal — #110 (SeriousM, Galaxy S23).
+            // NO_SUGGESTIONS still kills the suggestion strip, so we
+            // get the privacy properties we want and the input
+            // actually goes through.
             outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT or
-                    EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                    EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
+                    EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT
         }
 
         // fullEditor=true gives BaseInputConnection a real Editable, which
