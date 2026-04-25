@@ -18,6 +18,7 @@ package org.connectbot.terminal
 
 import android.content.Context
 import android.text.Selection
+import android.util.Log
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.BaseInputConnection
@@ -153,6 +154,7 @@ internal class ImeInputView(
         // to, so its mic / suggestion strip / AI Core writing assist all go
         // away. Physical key events still flow through View.dispatchKeyEvent.
         if (rawKeyboardMode) {
+            Log.d(TAG, "onCreateInputConnection: rawKeyboardMode -> null")
             activeConnection = null
             return null
         }
@@ -221,6 +223,11 @@ internal class ImeInputView(
         // default Secure mode where NO_SUGGESTIONS is already set and we
         // don't want the editable to accumulate shell input.
         val fullEditor = isComposeModeActive || allowStandardKeyboard
+        Log.d(TAG, "onCreateInputConnection: mode=" +
+            (if (allowStandardKeyboard) "STANDARD" else "SECURE") +
+            " compose=$isComposeModeActive fullEditor=$fullEditor" +
+            " inputType=0x${outAttrs.inputType.toString(16)}" +
+            " imeOptions=0x${outAttrs.imeOptions.toString(16)}")
         return TerminalInputConnection(this, fullEditor).also { activeConnection = it }
     }
 
@@ -298,6 +305,7 @@ internal class ImeInputView(
         private var pendingReplacementLength: Int = 0
 
         override fun setComposingRegion(start: Int, end: Int): Boolean {
+            Log.d(TAG, "setComposingRegion(start=$start, end=$end) composingText.len=${composingText.length}")
             super.setComposingRegion(start, end)
             // Only honour this when no composition is already in flight.
             // An active composition means the IME is re-scoping its own
@@ -315,6 +323,8 @@ internal class ImeInputView(
         }
 
         override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+            Log.d(TAG, "setComposingText(text=${text?.toString()?.take(40)?.let { "\"$it\"" } ?: "null"}" +
+                ", newCursorPos=$newCursorPosition) fullEditor=$fullEditor")
             if (!fullEditor) return super.setComposingText(text, newCursorPosition)
 
             val newText = text?.toString() ?: ""
@@ -335,6 +345,8 @@ internal class ImeInputView(
         }
 
         override fun finishComposingText(): Boolean {
+            Log.d(TAG, "finishComposingText() composing.len=${composingText.length}" +
+                " pendingReplacement=$pendingReplacementLength fullEditor=$fullEditor")
             if (!fullEditor) return super.finishComposingText()
 
             super.finishComposingText()
@@ -367,6 +379,8 @@ internal class ImeInputView(
         }
 
         override fun deleteSurroundingText(leftLength: Int, rightLength: Int): Boolean {
+            Log.d(TAG, "deleteSurroundingText(left=$leftLength, right=$rightLength)" +
+                " composing.len=${composingText.length}")
             // Handle backspace by sending DEL key events.
             // When IME sends delete, it often sends (0, 0) or (1, 0) for backspace.
             if (rightLength == 0 && leftLength == 0) {
@@ -451,6 +465,8 @@ internal class ImeInputView(
         }
 
         override fun sendKeyEvent(event: KeyEvent): Boolean {
+            Log.d(TAG, "sendKeyEvent(action=${event.action} keyCode=${event.keyCode}" +
+                " unicode=${event.unicodeChar}) suppressed=$suppressKeyEvents")
             if (suppressKeyEvents) return true
             val isEnterDown = event.action == KeyEvent.ACTION_DOWN &&
                 event.keyCode == KeyEvent.KEYCODE_ENTER
@@ -505,6 +521,8 @@ internal class ImeInputView(
             newCursorPosition: Int,
             textAttribute: android.view.inputmethod.TextAttribute?,
         ): Boolean {
+            Log.d(TAG, "replaceText(start=$start, end=$end, text=\"${text.toString().take(40)}\"" +
+                ", newCursorPos=$newCursorPosition)")
             val ed = editable
             val cursorBefore = ed?.let { Selection.getSelectionStart(it) } ?: -1
             val result = super.replaceText(start, end, text, newCursorPosition, textAttribute)
@@ -526,6 +544,8 @@ internal class ImeInputView(
 
         override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
             val committedText = text?.toString() ?: ""
+            Log.d(TAG, "commitText(\"${committedText.take(40)}\", newCursorPos=$newCursorPosition)" +
+                " pendingReplacement=$pendingReplacementLength")
             // super.commitText() updates the Editable state (needed for IME sync)
             // but also dispatches key events via sendKeyEvent(). Suppress those
             // to avoid double input — we send the text ourselves via sendTextInput().
@@ -652,6 +672,13 @@ internal class ImeInputView(
     }
 
     internal companion object {
+        // Logcat tag for IME diagnostics. Logged from each InputConnection
+        // callback so users hitting input regressions (e.g. #110) can
+        // capture a logcat that shows which methods the IME is calling
+        // and what we're returning. Enable in-app via Settings → Logcat
+        // Capture, then `grep ImeInputView /sdcard/Download/haven-logcat.txt`.
+        const val TAG = "ImeInputView"
+
         /**
          * Whether a hardware-keyboard key press should wipe the IME's tracked
          * buffer before the terminal processes the event.
