@@ -116,6 +116,14 @@ private enum class GestureType {
     Selection,
     Zoom,
     HandleDrag,
+    /**
+     * Mouse drag forwarded to the remote (tmux mouse mode). Press/motion/release
+     * dispatched via [TerminalGestureCallback.onMouseDrag]. Selected when
+     * a gestureCallback is present, the user starts dragging without a
+     * long-press, and the callback claims the gesture (returns true on
+     * [MouseDragPhase.Start]). (#94)
+     */
+    MouseDrag,
 }
 
 /**
@@ -1161,6 +1169,10 @@ internal fun TerminalWithAccessibility(
                         var accumulatedScrollY = 0f
                         // Track whether this is a horizontal drag (tab swipe)
                         var isHorizontalDrag = false
+                        // Last cell coordinates dispatched as a MouseDrag(Move),
+                        // used to quantize per-pixel events down to per-cell.
+                        var lastMouseDragCol = -1
+                        var lastMouseDragRow = -1
 
                         while (true) {
                             val event: PointerEvent =
@@ -1200,8 +1212,26 @@ internal fun TerminalWithAccessibility(
                                     } else {
                                         longPressJob.cancel()
                                         callbackLongPressJob?.cancel()
-                                        gestureType = GestureType.Scroll
-                                        // Clear any active selection when scrolling starts
+                                        // Mouse-mode drag: offer the gesture to the
+                                        // callback first so the remote (tmux/zellij/...)
+                                        // can own the selection across its own scrollback.
+                                        // The callback decides per-call whether to claim
+                                        // (e.g. gated by a user setting); falling through
+                                        // to Scroll preserves the legacy drag-to-scroll-
+                                        // tmux behaviour.  (#94)
+                                        val downCol = (down.position.x / baseCharWidth).toInt()
+                                            .coerceIn(0, screenState.snapshot.cols - 1)
+                                        val downRow = (down.position.y / baseCharHeight).toInt()
+                                            .coerceIn(0, screenState.snapshot.rows - 1)
+                                        val claimed = gestureCallback
+                                            ?.onMouseDrag(downCol, downRow, MouseDragPhase.Start)
+                                            ?: false
+                                        gestureType = if (claimed) {
+                                            GestureType.MouseDrag
+                                        } else {
+                                            GestureType.Scroll
+                                        }
+                                        // Clear any active selection when scrolling/dragging starts
                                         if (selectionManager.mode != SelectionMode.NONE) {
                                             selectionManager.clearSelection()
                                         }
@@ -1235,6 +1265,34 @@ internal fun TerminalWithAccessibility(
                                                 val scrollUp = relY < EDGE_SCROLL_ZONE
                                                 gestureCallback.onScroll(dragCol, dragRow, scrollUp)
                                             }
+                                        }
+                                    }
+                                }
+
+                                GestureType.MouseDrag -> {
+                                    // Quantize motion to cell boundaries — the remote
+                                    // (tmux et al.) only cares about cell-resolution
+                                    // changes; sending per-pixel events would flood the
+                                    // wire and make tmux's selection-extension stutter.
+                                    val dragCol = (change.position.x / baseCharWidth).toInt()
+                                        .coerceIn(0, screenState.snapshot.cols - 1)
+                                    val dragRow = (change.position.y / baseCharHeight).toInt()
+                                        .coerceIn(0, screenState.snapshot.rows - 1)
+                                    if (dragCol != lastMouseDragCol || dragRow != lastMouseDragRow) {
+                                        gestureCallback?.onMouseDrag(dragCol, dragRow, MouseDragPhase.Move)
+                                        lastMouseDragCol = dragCol
+                                        lastMouseDragRow = dragRow
+                                    }
+                                    // Edge-zone wheel events: same shape as Selection's
+                                    // edge-scroll, so tmux's copy-mode auto-scroll +
+                                    // selection-extension fires when the finger reaches
+                                    // the top/bottom of the viewport.
+                                    if (gestureCallback != null) {
+                                        val relY = change.position.y /
+                                            (screenState.snapshot.rows * baseCharHeight)
+                                        if (relY < EDGE_SCROLL_ZONE || relY > 1f - EDGE_SCROLL_ZONE) {
+                                            val scrollUp = relY < EDGE_SCROLL_ZONE
+                                            gestureCallback.onScroll(dragCol, dragRow, scrollUp)
                                         }
                                     }
                                 }
@@ -1350,6 +1408,19 @@ internal fun TerminalWithAccessibility(
                                 if (selectionManager.isSelecting) {
                                     selectionManager.endSelection()
                                 }
+                            }
+
+                            GestureType.MouseDrag -> {
+                                // Use the last dispatched cell if we have one,
+                                // otherwise fall back to the current pointer
+                                // position (covers the rare release-without-move case).
+                                val endCol = if (lastMouseDragCol >= 0) lastMouseDragCol
+                                    else (down.position.x / baseCharWidth).toInt()
+                                        .coerceIn(0, screenState.snapshot.cols - 1)
+                                val endRow = if (lastMouseDragRow >= 0) lastMouseDragRow
+                                    else (down.position.y / baseCharHeight).toInt()
+                                        .coerceIn(0, screenState.snapshot.rows - 1)
+                                gestureCallback?.onMouseDrag(endCol, endRow, MouseDragPhase.End)
                             }
 
                             GestureType.Undetermined -> {

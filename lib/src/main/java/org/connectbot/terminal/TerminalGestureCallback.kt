@@ -33,4 +33,32 @@ interface TerminalGestureCallback {
 
     /** Vertical scroll at terminal cell. Return true to suppress default (scrollback). */
     fun onScroll(col: Int, row: Int, scrollUp: Boolean): Boolean = false
+
+    /**
+     * Mouse drag while a button is held. Called once at [MouseDragPhase.Start]
+     * (when the press is first promoted to a drag), repeatedly at
+     * [MouseDragPhase.Move] for each cell change, and once at
+     * [MouseDragPhase.End] when the press releases.
+     *
+     * Return `true` from [MouseDragPhase.Start] to claim the gesture — the
+     * terminal will then route subsequent moves and the end here, and skip
+     * its built-in scroll handling. Returning `false` from Start lets the
+     * terminal fall back to scroll-via-wheel-events as before. The return
+     * value is ignored for Move and End — once a drag is claimed it stays
+     * claimed for the rest of that gesture.
+     *
+     * Used for forwarding press+motion+release sequences to a remote that's
+     * in mouse-tracking mode (tmux with `set -g mouse on`, etc.) so the
+     * remote can do its own selection across its own scrollback. Without
+     * motion forwarding, the remote sees only press+release and can't
+     * select anything. (#94)
+     */
+    fun onMouseDrag(col: Int, row: Int, phase: MouseDragPhase): Boolean = false
+}
+
+/** Phase of a mouse-drag gesture. See [TerminalGestureCallback.onMouseDrag]. */
+enum class MouseDragPhase {
+    Start,
+    Move,
+    End,
 }
