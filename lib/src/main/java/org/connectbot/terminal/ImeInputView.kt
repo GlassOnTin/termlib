@@ -336,22 +336,29 @@ internal class ImeInputView(
         }
 
         override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+            val newText = text?.toString() ?: ""
             Log.d(TAG, "setComposingText(text=${text?.toString()?.take(40)?.let { "\"$it\"" } ?: "null"}" +
                 ", newCursorPos=$newCursorPosition) fullEditor=$fullEditor")
-            if (!fullEditor) return super.setComposingText(text, newCursorPosition)
-
-            val newText = text?.toString() ?: ""
             super.setComposingText(text, newCursorPosition)
 
-            // Floating-composer model: the in-flight composition lives in an
-            // overlay, never in the terminal. We only update the tracker and
-            // the flow; no bytes hit the remote shell until commitText() fires.
-            // Crucial for CJK (romaji → kanji conversion used to flicker the
-            // terminal with backspace+rewrite each candidate) and for high-
-            // latency transports (mosh, ET) where those round-trips were slow.
+            // Track composition in BOTH modes. fullEditor publishes to the
+            // floating-overlay flow (CJK candidate display); non-fullEditor
+            // (Secure) keeps the tracker so finishComposingText can commit —
+            // Samsung Keyboard composes everything via setComposingText then
+            // accepts via finishComposingText without ever firing commitText
+            // (#110). No overlay in Secure mode (we don't publish to the flow),
+            // so typed text appears in the terminal at word boundaries.
+            //
+            // Floating-composer rationale (fullEditor): the in-flight
+            // composition lives in an overlay, never in the terminal. Crucial
+            // for CJK (romaji → kanji conversion used to flicker the terminal
+            // with backspace+rewrite each candidate) and for high-latency
+            // transports (mosh, ET) where those round-trips were slow.
             if (newText != composingText) {
                 composingText = newText
-                _composingText.value = newText
+                if (fullEditor) {
+                    _composingText.value = newText
+                }
             }
             notifyImeSelection()
             return true
@@ -360,24 +367,34 @@ internal class ImeInputView(
         override fun finishComposingText(): Boolean {
             Log.d(TAG, "finishComposingText() composing.len=${composingText.length}" +
                 " pendingReplacement=$pendingReplacementLength fullEditor=$fullEditor")
-            if (!fullEditor) return super.finishComposingText()
-
             super.finishComposingText()
 
-            // Replacement confirmed via finishComposingText (rather than
-            // commitText): the IME marked a region as composing then
-            // laid down a new composition on top. Some keyboards
-            // (Gboard's English autocorrect in particular) then fire
-            // finishComposingText to accept it, never a commitText. If
-            // we just clear state here the correction vanishes — apply
-            // it now.
             if (pendingReplacementLength > 0 && composingText.isNotEmpty()) {
+                // Replacement confirmed via finishComposingText (rather than
+                // commitText): the IME marked a region as composing then
+                // laid down a new composition on top. Some keyboards
+                // (Gboard's English autocorrect in particular) then fire
+                // finishComposingText to accept it, never a commitText. If
+                // we just clear state here the correction vanishes — apply
+                // it now.
                 sendBackspaces(pendingReplacementLength)
+                sendTextInput(composingText)
+            } else if (!fullEditor && composingText.isNotEmpty()) {
+                // Secure-mode commit path: Samsung Keyboard
+                // (InputMethodManager_LC) composes the full word in
+                // setComposingText then accepts via finishComposingText
+                // without ever firing commitText. Without committing here
+                // the typed text is silently dropped — the user sees ENTER
+                // work (separate sendKeyEvent path) but no characters appear.
+                // v5.24.40's AUTO_CORRECT flag made Samsung talk to us; this
+                // finishes the round-trip. (#110)
                 sendTextInput(composingText)
             }
 
             composingText = ""
-            _composingText.value = ""
+            if (fullEditor) {
+                _composingText.value = ""
+            }
             // Either applied above or cancelled without a commit — either
             // way, don't carry a pending length into an unrelated future
             // commit.
