@@ -339,29 +339,82 @@ internal class ImeInputView(
             val newText = text?.toString() ?: ""
             Log.d(TAG, "setComposingText(text=${text?.toString()?.take(40)?.let { "\"$it\"" } ?: "null"}" +
                 ", newCursorPos=$newCursorPosition) fullEditor=$fullEditor")
+
+            if (!fullEditor) {
+                // Secure mode: eager-commit each delta immediately so sticky
+                // toolbar modifiers (Ctrl/Alt) take effect on the very next
+                // keypress. Without this, Samsung Keyboard
+                // (InputMethodManager_LC) buffers per-char sendKeyEvent
+                // until the user presses space/enter, so Ctrl+D needs three
+                // taps (Ctrl, D, ENTER) before the modifier+key actually
+                // dispatches — by that point the user has already typed
+                // ENTER which they didn't want as input. (#110)
+                //
+                // Skip super.setComposingText in this mode: BaseInputConnection
+                // without an Editable can otherwise dispatch sendKeyEvent for
+                // each composing char (visible in Robolectric and possibly
+                // some real-device IMEs), which would race our deliberate
+                // sendTextInput. We're authoritative here — the IME doesn't
+                // need a matching Editable on this side.
+                //
+                // The composing buffer is the IME's running guess at the
+                // current word; in Secure mode we treat it as authoritative
+                // typed text. CJK composition uses fullEditor=true (Compose
+                // mode) — that path is unchanged.
+                applyComposingDelta(composingText, newText)
+                composingText = newText
+                notifyImeSelection()
+                return true
+            }
+
             super.setComposingText(text, newCursorPosition)
 
-            // Track composition in BOTH modes. fullEditor publishes to the
-            // floating-overlay flow (CJK candidate display); non-fullEditor
-            // (Secure) keeps the tracker so finishComposingText can commit —
-            // Samsung Keyboard composes everything via setComposingText then
-            // accepts via finishComposingText without ever firing commitText
-            // (#110). No overlay in Secure mode (we don't publish to the flow),
-            // so typed text appears in the terminal at word boundaries.
-            //
-            // Floating-composer rationale (fullEditor): the in-flight
-            // composition lives in an overlay, never in the terminal. Crucial
-            // for CJK (romaji → kanji conversion used to flicker the terminal
-            // with backspace+rewrite each candidate) and for high-latency
+            // Floating-composer model (fullEditor): the in-flight composition
+            // lives in an overlay, never in the terminal. Crucial for CJK
+            // (romaji → kanji conversion used to flicker the terminal with
+            // backspace+rewrite each candidate) and for high-latency
             // transports (mosh, ET) where those round-trips were slow.
+            // Bytes hit the remote shell only on commitText().
             if (newText != composingText) {
                 composingText = newText
-                if (fullEditor) {
-                    _composingText.value = newText
-                }
+                _composingText.value = newText
             }
             notifyImeSelection()
             return true
+        }
+
+        /**
+         * Compute and dispatch the diff between two consecutive composing
+         * buffers. Pure append → send the new chars. Pure shrink → send
+         * backspaces. Replacement → backspace old + send new. Each char
+         * sent is also queued for [sendKeyEvent] suppression because
+         * Samsung Keyboard re-fires each composed character via key event
+         * on its eventual flush (space/enter); without suppression the
+         * terminal would receive each char twice. (#110)
+         */
+        private fun applyComposingDelta(old: String, new: String) {
+            if (old == new) return
+            if (new.startsWith(old)) {
+                val delta = new.substring(old.length)
+                if (delta.isNotEmpty()) {
+                    sendTextInput(delta)
+                    delta.forEach { pendingSuppressChars.addLast(it) }
+                }
+                return
+            }
+            if (old.startsWith(new)) {
+                sendBackspaces(old.length - new.length)
+                return
+            }
+            // True replacement (rare; Samsung autocorrect/swipe). Backspace
+            // the old run then write the new — best we can do without a
+            // full diff. Suppress only the new chars; the backspaces don't
+            // come back via sendKeyEvent.
+            sendBackspaces(old.length)
+            if (new.isNotEmpty()) {
+                sendTextInput(new)
+                new.forEach { pendingSuppressChars.addLast(it) }
+            }
         }
 
         override fun finishComposingText(): Boolean {
@@ -376,18 +429,9 @@ internal class ImeInputView(
                 // (Gboard's English autocorrect in particular) then fire
                 // finishComposingText to accept it, never a commitText. If
                 // we just clear state here the correction vanishes — apply
-                // it now.
+                // it now. (fullEditor path; Secure mode has already committed
+                // each char via setComposingText.)
                 sendBackspaces(pendingReplacementLength)
-                sendTextInput(composingText)
-            } else if (!fullEditor && composingText.isNotEmpty()) {
-                // Secure-mode commit path: Samsung Keyboard
-                // (InputMethodManager_LC) composes the full word in
-                // setComposingText then accepts via finishComposingText
-                // without ever firing commitText. Without committing here
-                // the typed text is silently dropped — the user sees ENTER
-                // work (separate sendKeyEvent path) but no characters appear.
-                // v5.24.40's AUTO_CORRECT flag made Samsung talk to us; this
-                // finishes the round-trip. (#110)
                 sendTextInput(composingText)
             }
 
@@ -452,6 +496,34 @@ internal class ImeInputView(
         // our sendTextInput() both sending the same characters.
         private var suppressKeyEvents = false
 
+        // Chars committed eagerly via setComposingText (Secure mode) that
+        // Samsung Keyboard will re-fire later as sendKeyEvent on its
+        // batch-flush (space/enter). Each entry consumes exactly one
+        // matching ACTION_DOWN. ACTION_UP is harmless — KeyboardHandler
+        // only acts on KeyDown — so we let it through. (#110)
+        private val pendingSuppressChars: ArrayDeque<Char> = ArrayDeque()
+
+        /**
+         * Derive a printable codepoint from a KeyEvent for suppression
+         * matching. Prefers [KeyEvent.unicodeChar] (works in production
+         * with a real KeyCharacterMap) but falls back to deriving from
+         * keyCode for the common A–Z / 0–9 / SPACE keys so the suppress
+         * still fires in unit-test environments where unicodeChar can be
+         * 0. Returns 0 for non-printable keys.
+         */
+        private fun effectiveCharCode(event: KeyEvent): Int {
+            val u = event.unicodeChar
+            if (u != 0) return u
+            return when (event.keyCode) {
+                in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z ->
+                    'a'.code + (event.keyCode - KeyEvent.KEYCODE_A)
+                in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 ->
+                    '0'.code + (event.keyCode - KeyEvent.KEYCODE_0)
+                KeyEvent.KEYCODE_SPACE -> ' '.code
+                else -> 0
+            }
+        }
+
         private val handler = android.os.Handler(android.os.Looper.getMainLooper())
 
         // Enter deduplication: commitText("\n") always defers to sendKeyEvent.
@@ -496,8 +568,24 @@ internal class ImeInputView(
 
         override fun sendKeyEvent(event: KeyEvent): Boolean {
             Log.d(TAG, "sendKeyEvent(action=${event.action} keyCode=${event.keyCode}" +
-                " unicode=${event.unicodeChar}) suppressed=$suppressKeyEvents")
+                " unicode=${event.unicodeChar}) suppressed=$suppressKeyEvents" +
+                " pendingSuppress=${pendingSuppressChars.size}")
             if (suppressKeyEvents) return true
+
+            // Consume the deferred ACTION_DOWN that Samsung Keyboard fires
+            // for each character we already committed eagerly via
+            // setComposingText (Secure mode). ACTION_UP is intentionally not
+            // suppressed — KeyboardHandler ignores keyup, and consuming UP
+            // without DOWN can confuse long-press detection elsewhere in the
+            // view tree. (#110)
+            if (event.action == KeyEvent.ACTION_DOWN && pendingSuppressChars.isNotEmpty()) {
+                val incoming = effectiveCharCode(event)
+                if (incoming != 0 && pendingSuppressChars.first().code == incoming) {
+                    pendingSuppressChars.removeFirst()
+                    return true
+                }
+            }
+
             val isEnterDown = event.action == KeyEvent.ACTION_DOWN &&
                 event.keyCode == KeyEvent.KEYCODE_ENTER
             if (isEnterDown) {
@@ -678,6 +766,10 @@ internal class ImeInputView(
             composingText = ""
             _composingText.value = ""
             pendingReplacementLength = 0
+            // Stale entries here would suppress legitimate keypresses
+            // typed after a mode-change restartInput. Clear with the rest
+            // of the per-connection state.
+            pendingSuppressChars.clear()
         }
 
         /**

@@ -584,6 +584,70 @@ class ImeInputViewTest {
     }
 
     /**
+     * Samsung Keyboard composes typed text via setComposingText then accepts via
+     * finishComposingText without firing commitText. In Secure mode our
+     * setComposingText handler eagerly commits the delta so sticky toolbar
+     * modifiers (Ctrl/Alt) take effect on the very next keypress. (#110)
+     */
+    @Test
+    fun testTypeNullSetComposingTextEagerlyCommitsInSecureMode() {
+        val (ic, _, outputs) = createNonComposeModeCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("h", 1)
+            ic.setComposingText("he", 1)
+            ic.setComposingText("hel", 1)
+            ic.setComposingText("hell", 1)
+            ic.setComposingText("hello", 1)
+            ic.finishComposingText()
+        }
+        drainMainLooper()
+
+        val received = outputs.flatMap { it.toList() }.toByteArray().toString(Charsets.UTF_8)
+        assertEquals("hello", received)
+    }
+
+    /**
+     * Samsung Keyboard re-fires each composed character as a sendKeyEvent on its
+     * batch flush (space/enter). The chars we already committed eagerly via
+     * setComposingText must be suppressed to prevent double input. (#110)
+     */
+    @Test
+    fun testTypeNullSendKeyEventAfterEagerComposeIsSuppressed() {
+        val (ic, _, outputs) = createNonComposeModeCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("d", 1)
+            ic.finishComposingText()
+            // Samsung's deferred sendKeyEvent for the same char.
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_D))
+        }
+        drainMainLooper()
+
+        val received = outputs.flatMap { it.toList() }.toByteArray().toString(Charsets.UTF_8)
+        assertEquals("d", received)
+    }
+
+    /**
+     * Composition shrinks (user backspaces during composition before the IME
+     * has flushed): we should send backspaces for the lost chars. (#110)
+     */
+    @Test
+    fun testTypeNullSetComposingTextShrinkSendsBackspaces() {
+        val (ic, _, outputs) = createNonComposeModeCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("test", 1)
+            ic.setComposingText("te", 1)
+        }
+        drainMainLooper()
+
+        val received = outputs.flatMap { it.toList() }.toByteArray()
+        // First four bytes are "test"; then two DEL (0x7F) backspaces.
+        assertEquals("test".toByteArray().toList() + listOf(0x7F.toByte(), 0x7F.toByte()), received.toList())
+    }
+
+    /**
      * With TYPE_NULL, soft-keyboard backspace arrives via deleteSurroundingText →
      * sendKeyEvent(KEYCODE_DEL). Verify it reaches the terminal.
      */
