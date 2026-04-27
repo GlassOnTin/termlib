@@ -629,6 +629,68 @@ class ImeInputViewTest {
     }
 
     /**
+     * Real Samsung Keyboard "pwd<ENTER>" trace from SeriousM's logcat
+     * (#110 v5.24.46 confirmation). Each char arrives via setComposingText
+     * during typing (eager-committed), then finishComposingText with no
+     * extra commit, then ENTER as a real sendKeyEvent that should reach
+     * the terminal as 0x0d (CR). Asserts the full sequence renders as
+     * "pwd\n" or "pwd\r" — whatever the terminal layer emits for ENTER.
+     */
+    @Test
+    fun testTypeNullSamsungComposeMultiCharThenEnter() {
+        val (ic, _, outputs) = createNonComposeModeCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("p", 1)
+            ic.setComposingText("pw", 1)
+            ic.setComposingText("pwd", 1)
+            ic.finishComposingText()
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
+        }
+        drainMainLooper()
+
+        val received = outputs.flatMap { it.toList() }.toByteArray().toString(Charsets.UTF_8)
+        // Terminal emits CR for ENTER by default (DECCKM off, no LFE).
+        assertEquals("pwd\r", received)
+    }
+
+    /**
+     * Same multi-char path but with each char's *real-keyboard* ACTION_DOWN
+     * sendKeyEvent arriving after finishComposingText (some keyboards do this
+     * instead of accepting the composition). Each ACTION_DOWN should be
+     * suppressed — the terminal must receive each char exactly once.
+     */
+    @Test
+    fun testTypeNullSamsungMultiCharSuppressedOnDeferredKeyEvents() {
+        val (ic, _, outputs) = createNonComposeModeCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("h", 1)
+            ic.setComposingText("he", 1)
+            ic.setComposingText("hel", 1)
+            ic.setComposingText("hell", 1)
+            ic.setComposingText("hello", 1)
+            ic.finishComposingText()
+            // Deferred per-char sendKeyEvents that Samsung sometimes flushes.
+            listOf(
+                KeyEvent.KEYCODE_H,
+                KeyEvent.KEYCODE_E,
+                KeyEvent.KEYCODE_L,
+                KeyEvent.KEYCODE_L,
+                KeyEvent.KEYCODE_O,
+            ).forEach { code ->
+                ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
+                ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+            }
+        }
+        drainMainLooper()
+
+        val received = outputs.flatMap { it.toList() }.toByteArray().toString(Charsets.UTF_8)
+        assertEquals("hello", received)
+    }
+
+    /**
      * Composition shrinks (user backspaces during composition before the IME
      * has flushed): we should send backspaces for the lost chars. (#110)
      */
