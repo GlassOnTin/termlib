@@ -212,20 +212,28 @@ internal class ImeInputView(
             // suppresses autocomplete/prediction while keeping the composition
             // protocol active. See #96.
             //
-            // TYPE_TEXT_FLAG_AUTO_CORRECT is set deliberately *alongside*
-            // NO_SUGGESTIONS — they're contradictory by spec, but in
-            // practice Samsung Keyboard (InputMethodManager_LC on
-            // Galaxy S series, Android 16) gates input on AUTO_CORRECT
-            // being present. Without it, Samsung's framework logs
-            // `ssi() view is not EditText` and silently drops every
-            // commitText, so the user can press keys but nothing
-            // reaches the terminal — #110 (SeriousM, Galaxy S23).
-            // NO_SUGGESTIONS still kills the suggestion strip, so we
-            // get the privacy properties we want and the input
-            // actually goes through.
+            // TYPE_TEXT_FLAG_AUTO_CORRECT is conditional. It's spec-contradictory
+            // alongside NO_SUGGESTIONS, but Samsung Keyboard
+            // (InputMethodManager_LC on Galaxy S, Android 16) gates input on
+            // AUTO_CORRECT being present — without it, Samsung's framework
+            // logs `ssi() view is not EditText` and silently drops every
+            // commitText (#110, SeriousM, Galaxy S23).
+            //
+            // Gboard, however, honours AUTO_CORRECT even with NO_SUGGESTIONS:
+            // the suggestion strip is hidden but the silent autocorrect-on-
+            // space still fires, rewriting typed commands (#115, agevlakh).
+            //
+            // Resolution: detect the active IME and only set AUTO_CORRECT for
+            // IMEs that need the gate. Samsung family gets it; Gboard / FUTO /
+            // Heliboard / etc. don't, so they leave the user's typing alone.
+            // Other unknown IMEs default to NO AUTO_CORRECT — safer for
+            // terminal use; we'll add to the exception list as needed when
+            // logcat reveals new cases.
+            val needsAutoCorrectGate = isAutoCorrectGatedIme(context)
             outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT or
                     EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
-                    EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT
+                    if (needsAutoCorrectGate) EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT else 0
+            Log.d(TAG, "Secure mode flags: AUTO_CORRECT=${if (needsAutoCorrectGate) "on (IME gate)" else "off"}")
         }
 
         // fullEditor=true gives BaseInputConnection a real Editable, which
@@ -830,6 +838,54 @@ internal class ImeInputView(
             KeyEvent.KEYCODE_ESCAPE -> true
             else -> false
         }
+
+        /**
+         * Whether the active IME requires `TYPE_TEXT_FLAG_AUTO_CORRECT` on the
+         * Secure-mode input field to recognise it as a real text editor.
+         *
+         * Samsung Keyboard's `InputMethodManager_LC` framework (Galaxy S,
+         * Android 16+) gates input dispatch on AUTO_CORRECT presence —
+         * without it, every `commitText` is silently dropped (#110). Gboard
+         * and most other IMEs honour AUTO_CORRECT literally and apply
+         * autocorrect-on-space, which rewrites typed commands (#115). The
+         * resolution is to set AUTO_CORRECT only for IMEs in the gating
+         * family.
+         *
+         * Detected via `Settings.Secure.DEFAULT_INPUT_METHOD` — returns
+         * something like `com.samsung.android.honeyboard/.service.HoneyBoardService`.
+         * Match by package prefix so future Samsung releases (different
+         * package names) keep working without code changes.
+         */
+        fun isAutoCorrectGatedIme(context: Context): Boolean {
+            val activeIme = try {
+                android.provider.Settings.Secure.getString(
+                    context.contentResolver,
+                    android.provider.Settings.Secure.DEFAULT_INPUT_METHOD,
+                )
+            } catch (_: Exception) {
+                null
+            } ?: return false
+            val pkg = activeIme.substringBefore('/')
+            return AUTO_CORRECT_GATED_IME_PACKAGES.any { gated ->
+                pkg == gated || pkg.startsWith("$gated.")
+            }
+        }
+
+        /**
+         * IMEs that require `TYPE_TEXT_FLAG_AUTO_CORRECT` on the Secure-mode
+         * input field for input to dispatch at all. Match by package prefix.
+         * See [isAutoCorrectGatedIme]. Add new entries here when logcat
+         * reveals an IME silently dropping `commitText` calls; revert any
+         * AUTO_CORRECT-side-effect bug reports by removing entries.
+         */
+        private val AUTO_CORRECT_GATED_IME_PACKAGES = setOf(
+            // Samsung Keyboard family — all known package names. Samsung
+            // changes the package per major Android release; prefix-match
+            // keeps us covered without churn.
+            "com.samsung.android.honeyboard",
+            "com.samsung.android.icecone",
+            "com.sec.android.inputmethod",
+        )
 
         /**
          * Upper bound on `deleteSurroundingText.leftLength`. Real IMEs request
