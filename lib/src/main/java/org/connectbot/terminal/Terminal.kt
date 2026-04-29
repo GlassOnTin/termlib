@@ -909,6 +909,10 @@ internal fun TerminalWithAccessibility(
             }
         }
 
+        // Track whether we've sized the emulator once so subsequent resizes
+        // can debounce without delaying the initial paint.
+        var initialResizeDone by remember(terminalEmulator) { mutableStateOf(false) }
+
         // Resize terminal when dimensions change
         LaunchedEffect(terminalEmulator, availableWidth, availableHeight, forcedSize, baseCharWidth, baseCharHeight) {
             if (availableWidth == 0 || availableHeight == 0 || baseCharWidth <= 0f || baseCharHeight <= 0f) {
@@ -922,15 +926,28 @@ internal fun TerminalWithAccessibility(
                 forcedSize?.first ?: charsPerDimension(availableHeight, baseCharHeight)
 
             val dimensions = terminalEmulator.dimensions
-            if (newRows != dimensions.rows || newCols != dimensions.columns) {
-                terminalEmulator.resize(newRows, newCols)
+            if (newRows == dimensions.rows && newCols == dimensions.columns) {
+                return@LaunchedEffect
+            }
 
-                // If selection is active, ensure it stays within the new visible bounds.
-                // This ensures the Copy button resets to the last visible line when the screen
-                // shrinks (e.g. keyboard up) without forcing a scroll to the bottom.
-                if (selectionManager.mode != SelectionMode.NONE) {
-                    selectionManager.clampToDimensions(newRows, newCols)
-                }
+            // Debounce rapid size changes (IME insets animation, pinch-to-zoom).
+            // The LaunchedEffect cancels in flight when keys change, so only the
+            // final stable size completes the delay and reaches the emulator.
+            // Without this, libvterm's inactive-buffer resize fills new cells
+            // using the active buffer's drawing pen — leaking a mid-redraw
+            // foreground app's pen colour into the primary buffer.
+            if (initialResizeDone) {
+                delay(80)
+            }
+
+            terminalEmulator.resize(newRows, newCols)
+            initialResizeDone = true
+
+            // If selection is active, ensure it stays within the new visible bounds.
+            // This ensures the Copy button resets to the last visible line when the screen
+            // shrinks (e.g. keyboard up) without forcing a scroll to the bottom.
+            if (selectionManager.mode != SelectionMode.NONE) {
+                selectionManager.clampToDimensions(newRows, newCols)
             }
         }
 
