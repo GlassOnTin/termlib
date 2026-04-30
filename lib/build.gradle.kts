@@ -43,7 +43,7 @@ val cmakeBuildHost by tasks.registering(Exec::class) {
 android {
     namespace = "org.connectbot.terminal"
     compileSdk = 36
-    ndkVersion = "28.2.13676358"
+    ndkVersion = "29.0.14206865"
 
     defaultConfig {
         minSdk = 24
