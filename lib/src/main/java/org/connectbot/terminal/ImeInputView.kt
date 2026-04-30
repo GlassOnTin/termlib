@@ -206,34 +206,47 @@ internal class ImeInputView(
             outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT or
                     EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT
         } else {
-            // Terminal mode (default):
-            // TYPE_CLASS_TEXT enables IME composition (required for CJK input
-            // methods — Japanese, Chinese, Korean). TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            // suppresses autocomplete/prediction while keeping the composition
-            // protocol active. See #96.
+            // Terminal mode (default): pick flags that keep the user's typing
+            // verbatim and don't let the IME rewrite commands.
             //
-            // TYPE_TEXT_FLAG_AUTO_CORRECT is conditional. It's spec-contradictory
-            // alongside NO_SUGGESTIONS, but Samsung Keyboard
-            // (InputMethodManager_LC on Galaxy S, Android 16) gates input on
-            // AUTO_CORRECT being present — without it, Samsung's framework
-            // logs `ssi() view is not EditText` and silently drops every
-            // commitText (#110, SeriousM, Galaxy S23).
+            // Two paths, gated by isAutoCorrectGatedIme(context):
             //
-            // Gboard, however, honours AUTO_CORRECT even with NO_SUGGESTIONS:
-            // the suggestion strip is hidden but the silent autocorrect-on-
-            // space still fires, rewriting typed commands (#115, agevlakh).
+            // 1. Samsung family (gated). Samsung's InputMethodManager_LC
+            //    gate (Galaxy S, Android 16) drops every commitText unless
+            //    TYPE_TEXT_FLAG_AUTO_CORRECT is present (#110, SeriousM).
+            //    We pair it with NO_SUGGESTIONS to suppress the strip; the
+            //    eager-commit composing-text path keeps autocorrect from
+            //    rewriting what reaches the terminal.
             //
-            // Resolution: detect the active IME and only set AUTO_CORRECT for
-            // IMEs that need the gate. Samsung family gets it; Gboard / FUTO /
-            // Heliboard / etc. don't, so they leave the user's typing alone.
-            // Other unknown IMEs default to NO AUTO_CORRECT — safer for
-            // terminal use; we'll add to the exception list as needed when
-            // logcat reveals new cases.
+            // 2. Everything else (Gboard, FUTO, Heliboard, Huawei Celia,
+            //    ...). NO_SUGGESTIONS alone is *not* enough: Gboard hides
+            //    the strip but its silent autocorrect / autocap / autospace
+            //    still fires on word boundaries (#115, agevlakh — typed
+            //    "cd" landed as "CD", "ip" as "IP "). The standard Android
+            //    opt-out from every IME smart behaviour is
+            //    TYPE_TEXT_VARIATION_VISIBLE_PASSWORD: it tells the IME the
+            //    field holds a free-form, non-correctable token. We layer
+            //    NO_SUGGESTIONS on top so any IME that honours both gets
+            //    no UI suggestions either.
+            //
+            //    Tradeoff: VISIBLE_PASSWORD disables IME composition, so
+            //    CJK input doesn't work in default Secure mode. Users who
+            //    type CJK should switch to Compose mode (Settings →
+            //    Keyboard) — that path already uses TYPE_CLASS_TEXT only.
+            //    Voice input / swipe typing similarly belong in Standard
+            //    mode.
             val needsAutoCorrectGate = isAutoCorrectGatedIme(context)
-            outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT or
-                    EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
-                    if (needsAutoCorrectGate) EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT else 0
-            Log.d(TAG, "Secure mode flags: AUTO_CORRECT=${if (needsAutoCorrectGate) "on (IME gate)" else "off"}")
+            outAttrs.inputType = if (needsAutoCorrectGate) {
+                EditorInfo.TYPE_CLASS_TEXT or
+                        EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
+                        EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT
+            } else {
+                EditorInfo.TYPE_CLASS_TEXT or
+                        EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
+                        EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            }
+            Log.d(TAG, "Secure mode flags: gated=$needsAutoCorrectGate" +
+                " inputType=0x${outAttrs.inputType.toString(16)}")
         }
 
         // fullEditor=true gives BaseInputConnection a real Editable, which
