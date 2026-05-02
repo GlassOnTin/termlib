@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="terminal_selection_copy">কপি করুন</string>
+    <string name="terminal_selection_more_options">⋮</string>
+    <string name="terminal_selection_more_options_description">আরও বিকল্প</string>
+    <string name="terminal_selection_select_all">সব নির্বাচন করুন</string>
+    <string name="terminal_selection_share">শেয়ার করুন</string>
+    <string name="terminal_selection_paste">পেস্ট করুন</string>
+    <string name="terminal_selection_mode_character">মোড: অক্ষর</string>
+    <string name="terminal_selection_mode_word">মোড: শব্দ</string>
+    <string name="terminal_selection_mode_line">মোড: লাইন</string>
+</resources>
