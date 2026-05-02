@@ -99,6 +99,24 @@ internal class ImeInputView(
         }
 
     /**
+     * Custom IME flag bundle. When non-null, [onCreateInputConnection]
+     * skips the Secure/Standard preset logic and assembles `inputType`
+     * + `imeOptions` from these toggles directly. Lets a power user
+     * tune around their specific IME's quirks (e.g. voice-on-Gboard
+     * without autocorrect, or Samsung Honeyboard unblocked without
+     * autocap).
+     */
+    var customImeFlags: ImeFlagBundle? = null
+        set(value) {
+            if (field == value) return
+            field = value
+            if (windowToken != null) {
+                flushCompositionBeforeRestart()
+                inputMethodManager.restartInput(this)
+            }
+        }
+
+    /**
      * Live IME composition text (romaji mid-conversion, pinyin candidates, etc.)
      * Emits the empty string when no composition is active. Observed by the
      * terminal UI to render a floating composer overlay near the cursor
@@ -158,6 +176,12 @@ internal class ImeInputView(
             activeConnection = null
             return null
         }
+
+        // Custom mode: caller has set explicit flag toggles, ignore the
+        // Secure/Standard inferential logic below and assemble exactly
+        // what was asked for. Lets a power user tune around their
+        // specific IME's quirks (#115 follow-up).
+        customImeFlags?.let { return openCustomFlagInputConnection(outAttrs, it) }
 
         // Configure IME options. NO_PERSONALIZED_LEARNING tells on-device
         // IME features (Gboard's word bank, Gemini Nano / AI Core writing
@@ -812,6 +836,41 @@ internal class ImeInputView(
         internal fun resetPendingReplacement() {
             pendingReplacementLength = 0
         }
+    }
+
+    /**
+     * Build an InputConnection from an explicit user-chosen flag set.
+     * Bypasses the Secure/Standard preset logic; the caller is
+     * presumed to know what they want. Conflicting bits (e.g. both
+     * VISIBLE_PASSWORD and fullEditor) are preserved verbatim — the
+     * Settings UI documents the trade-offs and the user picks.
+     */
+    private fun openCustomFlagInputConnection(
+        outAttrs: EditorInfo,
+        flags: ImeFlagBundle,
+    ): InputConnection {
+        val noLearning = if (flags.noPersonalizedLearning) EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING else 0
+        val noExtractUi = if (flags.noExtractUi) EditorInfo.IME_FLAG_NO_EXTRACT_UI else 0
+        outAttrs.imeOptions = outAttrs.imeOptions or
+                noExtractUi or
+                EditorInfo.IME_FLAG_NO_ENTER_ACTION or
+                noLearning or
+                EditorInfo.IME_ACTION_NONE
+
+        var inputType = EditorInfo.TYPE_CLASS_TEXT
+        if (flags.visiblePassword) inputType = inputType or EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+        if (flags.noSuggestions) inputType = inputType or EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        if (flags.autoCorrect) inputType = inputType or EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT
+        outAttrs.inputType = inputType
+        outAttrs.initialSelStart = 0
+        outAttrs.initialSelEnd = 0
+
+        Log.d(TAG, "onCreateInputConnection: CUSTOM" +
+            " inputType=0x${outAttrs.inputType.toString(16)}" +
+            " imeOptions=0x${outAttrs.imeOptions.toString(16)}" +
+            " fullEditor=${flags.fullEditor}" +
+            " flags=$flags")
+        return TerminalInputConnection(this, flags.fullEditor).also { activeConnection = it }
     }
 
     internal companion object {

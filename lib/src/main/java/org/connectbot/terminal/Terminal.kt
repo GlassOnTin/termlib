@@ -357,6 +357,13 @@ fun Terminal(
     gestureCallback: TerminalGestureCallback? = null,
     allowStandardKeyboard: Boolean = false,
     rawKeyboardMode: Boolean = false,
+    /**
+     * When non-null, ImeInputView ignores the Secure/Standard
+     * inferential logic and assembles EditorInfo from these explicit
+     * toggles. Lets a power user tune around their IME's quirks
+     * (#115 follow-up). Default null = use the preset logic.
+     */
+    customImeFlags: ImeFlagBundle? = null,
     onPasteShortcut: (() -> Unit)? = null,
     onPasteRequest: (() -> Unit)? = null,
     rightAltMode: RightAltMode = RightAltMode.CharacterModifier,
@@ -391,6 +398,7 @@ fun Terminal(
         gestureCallback = gestureCallback,
         allowStandardKeyboard = allowStandardKeyboard,
         rawKeyboardMode = rawKeyboardMode,
+        customImeFlags = customImeFlags,
         onPasteShortcut = onPasteShortcut,
         onScrollControllerAvailable = null,
         onPasteRequest = onPasteRequest,
@@ -433,6 +441,7 @@ internal fun TerminalWithAccessibility(
     gestureCallback: TerminalGestureCallback? = null,
     allowStandardKeyboard: Boolean = false,
     rawKeyboardMode: Boolean = false,
+    customImeFlags: ImeFlagBundle? = null,
     onPasteShortcut: (() -> Unit)? = null,
     onScrollControllerAvailable: ((ScrollController) -> Unit)? = null,
     onPasteRequest: (() -> Unit)? = null,
@@ -1833,6 +1842,7 @@ internal fun TerminalWithAccessibility(
                     ImeInputView(context, keyboardHandler).apply {
                         this.allowStandardKeyboard = allowStandardKeyboard
                         this.rawKeyboardMode = rawKeyboardMode
+                        this.customImeFlags = customImeFlags
                         // Set up key event handling
                         setOnKeyListener { _, _, event ->
                             if (event.action == android.view.KeyEvent.ACTION_DOWN &&
@@ -1851,6 +1861,7 @@ internal fun TerminalWithAccessibility(
                 update = { view ->
                     view.allowStandardKeyboard = allowStandardKeyboard
                     view.rawKeyboardMode = rawKeyboardMode
+                    view.customImeFlags = customImeFlags
                 },
                 modifier = Modifier
                     .size(1.dp)
