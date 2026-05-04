@@ -543,6 +543,27 @@ internal class TerminalEmulatorImpl(
                             cursorBlink = value.value
                             propertyChanged = true
                         }
+
+                        // Property 3 is VTERM_PROP_ALTSCREEN. On the
+                        // transition OFF (alt-screen → primary), force
+                        // a full screen redamage so the renderer re-
+                        // pulls every cell from libvterm. Without this
+                        // we sometimes inherit stale cached lines from
+                        // before alt-screen activated, surfacing as
+                        // "garbage in scrollback after nano exit"
+                        // (#120). The transition ON path doesn't need
+                        // it — alt-screen activation always paints a
+                        // fresh buffer.
+                        3 -> {
+                            if (!value.value) {
+                                pendingDamageRegions.clear()
+                                pendingDamageRegions.add(DamageRegion(0, rows, 0, cols))
+                                if (!damagePosted) {
+                                    handler.post { processPendingUpdates() }
+                                    damagePosted = true
+                                }
+                            }
+                        }
                     }
                 }
 
