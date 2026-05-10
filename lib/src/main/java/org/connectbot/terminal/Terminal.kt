@@ -51,6 +51,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
@@ -1017,6 +1018,25 @@ internal fun TerminalWithAccessibility(
             }
         }
 
+        // Keep an existing (non-actively-extending) selection anchored on
+        // its logical lines while the viewport scrolls. Mirrors the
+        // desktop-terminal behaviour where scrolling never disturbs the
+        // current selection. Skipped while the user is mid-drag-extend
+        // (selectionManager.isSelecting) — the gesture handler manages
+        // the start anchor explicitly there to avoid double-shifting.
+        var lastScrollbackPos by remember { mutableIntStateOf(screenState.scrollbackPosition) }
+        LaunchedEffect(screenState.scrollbackPosition) {
+            val newPos = screenState.scrollbackPosition
+            val delta = newPos - lastScrollbackPos
+            lastScrollbackPos = newPos
+            if (delta != 0 &&
+                selectionManager.mode != SelectionMode.NONE &&
+                !selectionManager.isSelecting
+            ) {
+                selectionManager.shiftSelectionByRows(delta)
+            }
+        }
+
         // Calculate actual terminal dimensions in pixels
         val terminalWidthPx = newCols * baseCharWidth
         val terminalHeightPx = newRows * baseCharHeight
@@ -1276,10 +1296,13 @@ internal fun TerminalWithAccessibility(
                                         } else {
                                             GestureType.Scroll
                                         }
-                                        // Clear any active selection when scrolling/dragging starts
-                                        if (selectionManager.mode != SelectionMode.NONE) {
-                                            selectionManager.clearSelection()
-                                        }
+                                        // Selection is preserved across scroll —
+                                        // the LaunchedEffect on scrollbackPosition
+                                        // shifts both anchors in lockstep so the
+                                        // highlight stays on its logical lines as
+                                        // the viewport moves under the finger.
+                                        // Long-press to start a new selection
+                                        // replaces any existing one.
                                     }
                                 }
                             }

@@ -320,6 +320,24 @@ internal class SelectionManager {
     }
 
     /**
+     * Shift BOTH anchors by [delta]. Used by the Compose-side scroll
+     * observer to keep an existing (non-actively-extending) selection
+     * anchored on its logical lines as the viewport scrolls under it —
+     * the desktop-terminal behaviour where scrolling preserves the
+     * selection. During an active drag-extend ([isSelecting] == true)
+     * the gesture handler manages the start anchor explicitly via
+     * [shiftSelectionStartByRows], so this should NOT be called in
+     * that case (it would double-shift the start anchor).
+     */
+    fun shiftSelectionByRows(delta: Int) {
+        val range = selectionRange ?: return
+        selectionRange = range.copy(
+            startRow = range.startRow + delta,
+            endRow = range.endRow + delta,
+        )
+    }
+
+    /**
      * Clamps the selection range to the given dimensions.
      * Useful when the terminal is resized.
      */
