@@ -364,6 +364,129 @@ class SelectionControllerTest {
         assertTrue(range.endRow >= 0) // Should not go negative
     }
 
+    @Test
+    fun testShiftSelectionStartByRowsExtendsAnchorPastViewport() {
+        // Drag-select-into-scrollback simulation (#94). The gesture
+        // handler scrolls the viewport up and calls
+        // shiftSelectionStartByRows(+1) so the anchor keeps pointing at
+        // the original line as everything shifts down in the viewport.
+        // After enough shifts the anchor row legitimately exceeds the
+        // viewport height — the resolver still finds the right line via
+        // the snapshot scrollback ring.
+        //
+        // Uses LINE mode because the gesture-driven extension of column
+        // bounds at the corner anchors is independent of the row-shift
+        // mechanism this test is exercising.
+        val snapshot = createSnapshotWithScrollback(
+            screenLines = listOf("screen-0", "screen-1", "screen-2"),
+            scrollbackLines = listOf("hist-0", "hist-1", "hist-2", "hist-3"),
+            cols = 80,
+            rows = 3,
+        )
+        selectionManager.startSelection(
+            row = 1,
+            col = 0,
+            cols = 80,
+            mode = SelectionMode.LINE,
+            snapshot = snapshot,
+            scrollbackPosition = 0,
+        )
+
+        // Simulate two scroll-up steps: each moves scrollbackPosition +1
+        // and the anchor +1 in lockstep. After two shifts the anchor row
+        // is 3 (off the bottom of the 3-row viewport), but the logical
+        // line it points to is still "screen-1".
+        selectionManager.shiftSelectionStartByRows(+1)
+        selectionManager.shiftSelectionStartByRows(+1)
+        // The drag pointer is at the top edge throughout, so the end
+        // row stays at 0; updating it after each scroll mirrors what
+        // the gesture handler does.
+        selectionManager.updateSelection(row = 0, col = 0)
+
+        val range = selectionManager.selectionRange!!
+        assertEquals("anchor row tracks viewport shift", 3, range.startRow)
+        assertEquals(0, range.endRow)
+
+        // With scrollbackPosition=2, the resolved selection text spans
+        // hist-2, hist-3, screen-0, screen-1 (top-down).
+        val text = selectionManager.getSelectedText(snapshot, scrollbackPosition = 2)
+        assertEquals("hist-2\nhist-3\nscreen-0\nscreen-1", text)
+    }
+
+    @Test
+    fun testShiftSelectionStartByRowsTowardScreen() {
+        // Symmetric case: user already scrolled back, selected something
+        // in scrollback, then drags toward the bottom edge. Each scroll-
+        // down step decrements scrollbackPosition and shifts the anchor
+        // -1 so it stays on its logical line.
+        val snapshot = createSnapshotWithScrollback(
+            screenLines = listOf("screen-0", "screen-1", "screen-2"),
+            scrollbackLines = listOf("hist-0", "hist-1", "hist-2", "hist-3"),
+            cols = 80,
+            rows = 3,
+        )
+        // Anchor on the topmost visible scrollback line (hist-1) when
+        // scrollbackPosition=3: viewport row 0 → scrollback[size-3]
+        // = scrollback[1] = "hist-1".
+        selectionManager.startSelection(
+            row = 0,
+            col = 0,
+            cols = 80,
+            mode = SelectionMode.CHARACTER,
+            snapshot = snapshot,
+            scrollbackPosition = 3,
+        )
+
+        // Two scroll-down steps: anchor row goes from 0 to -2.
+        selectionManager.shiftSelectionStartByRows(-1)
+        selectionManager.shiftSelectionStartByRows(-1)
+        // Drag pointer at bottom edge — end row = rows - 1 = 2.
+        selectionManager.updateSelection(row = 2, col = "screen-1".length - 1)
+
+        val range = selectionManager.selectionRange!!
+        assertEquals(-2, range.startRow)
+        assertEquals(2, range.endRow)
+
+        // scrollbackPosition is now 1 (started at 3, scrolled down twice).
+        // Selection should resolve to: hist-1 (at row -2 relative to
+        // pos=1 → scrollback[size - 1 + (-2)] = scrollback[1]),
+        // hist-2 (row -1), hist-3 (row 0), screen-0 (row 1), screen-1 (row 2).
+        val text = selectionManager.getSelectedText(snapshot, scrollbackPosition = 1)
+        assertEquals("hist-1\nhist-2\nhist-3\nscreen-0\nscreen-1", text)
+    }
+
+    private fun createSnapshotWithScrollback(
+        screenLines: List<String>,
+        scrollbackLines: List<String>,
+        cols: Int,
+        rows: Int,
+    ): TerminalSnapshot {
+        fun toLine(text: String, row: Int): TerminalLine {
+            val cells = (0 until cols).map { col ->
+                TerminalLine.Cell(
+                    char = text.getOrElse(col) { ' ' },
+                    fgColor = Color.White,
+                    bgColor = Color.Black,
+                )
+            }
+            return TerminalLine(row, cells)
+        }
+        return TerminalSnapshot(
+            lines = screenLines.mapIndexed { i, t -> toLine(t, i) },
+            scrollback = scrollbackLines.mapIndexed { i, t -> toLine(t, -1) },
+            cursorRow = 0,
+            cursorCol = 0,
+            cursorVisible = true,
+            cursorBlink = true,
+            cursorShape = CursorShape.BLOCK,
+            terminalTitle = "",
+            rows = rows,
+            cols = cols,
+            timestamp = 0L,
+            sequenceNumber = 0L,
+        )
+    }
+
     // Helper function to create a test snapshot
     private fun createTestSnapshot(): TerminalSnapshot {
         val lines = mutableListOf<TerminalLine>()

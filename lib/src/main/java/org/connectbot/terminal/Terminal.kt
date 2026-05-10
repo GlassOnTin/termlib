@@ -1282,23 +1282,51 @@ internal fun TerminalWithAccessibility(
                                         val dragRow =
                                             (change.position.y / baseCharHeight).toInt()
                                                 .coerceIn(0, screenState.snapshot.rows - 1)
+
+                                        // Edge-zone extension. Two paths:
+                                        //  1. Mouse-mode (callback present) — forward
+                                        //     wheel events to the remote so e.g. tmux
+                                        //     copy-mode auto-scrolls and extends its
+                                        //     own selection.
+                                        //  2. Native (no callback) — scroll our own
+                                        //     viewport one line and shift the selection
+                                        //     anchor in lockstep so it stays on the
+                                        //     same logical content line. This is what
+                                        //     lets a drag-select extend off the top of
+                                        //     the viewport into scrollback (#94).
+                                        val relY = change.position.y /
+                                            (screenState.snapshot.rows * baseCharHeight)
+                                        val nearTop = relY < EDGE_SCROLL_ZONE
+                                        val nearBottom = relY > 1f - EDGE_SCROLL_ZONE
+                                        val callbackHandled = if ((nearTop || nearBottom) && gestureCallback != null) {
+                                            gestureCallback.onScroll(dragCol, dragRow, nearTop)
+                                        } else false
+
+                                        if (!callbackHandled) {
+                                            if (nearTop && screenState.scrollbackPosition < screenState.snapshot.scrollback.size) {
+                                                screenState.scrollBy(+1)
+                                                selectionManager.shiftSelectionStartByRows(+1)
+                                                coroutineScope.launch {
+                                                    scrollOffset.snapTo(
+                                                        screenState.scrollbackPosition * baseCharHeight
+                                                    )
+                                                }
+                                            } else if (nearBottom && screenState.scrollbackPosition > 0) {
+                                                screenState.scrollBy(-1)
+                                                selectionManager.shiftSelectionStartByRows(-1)
+                                                coroutineScope.launch {
+                                                    scrollOffset.snapTo(
+                                                        screenState.scrollbackPosition * baseCharHeight
+                                                    )
+                                                }
+                                            }
+                                        }
+
                                         selectionManager.updateSelection(
                                             dragRow,
                                             dragCol
                                         )
                                         magnifierPosition = change.position
-
-                                        // Edge-scroll: when dragging near top/bottom
-                                        // during selection, fire scroll callback so TUI
-                                        // apps scroll the underlying content.
-                                        if (gestureCallback != null) {
-                                            val relY = change.position.y /
-                                                (screenState.snapshot.rows * baseCharHeight)
-                                            if (relY < EDGE_SCROLL_ZONE || relY > 1f - EDGE_SCROLL_ZONE) {
-                                                val scrollUp = relY < EDGE_SCROLL_ZONE
-                                                gestureCallback.onScroll(dragCol, dragRow, scrollUp)
-                                            }
-                                        }
                                     }
                                 }
 

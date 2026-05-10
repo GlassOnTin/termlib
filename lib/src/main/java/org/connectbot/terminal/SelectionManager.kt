@@ -300,6 +300,26 @@ internal class SelectionManager {
     }
 
     /**
+     * Shift the start anchor's row by [delta] (positive = downward,
+     * negative = upward in the viewport). Used by the gesture handler
+     * during drag-select when auto-scrolling near the edge: as the
+     * viewport scrolls, the anchor's row index needs to track its
+     * logical content line so the selection stays anchored on the
+     * line the user originally pressed (issue #94).
+     *
+     * No clamping — callers are expected to keep the column in range,
+     * but row may legitimately go outside `[0, rows-1]` while the
+     * anchor's content has scrolled off-viewport on either side.
+     * Selection extraction still resolves correctly because
+     * [SelectionManager.getSelectedText] passes the row through
+     * [getSnapshotLine], which handles rows beyond the viewport.
+     */
+    fun shiftSelectionStartByRows(delta: Int) {
+        val range = selectionRange ?: return
+        selectionRange = range.copy(startRow = range.startRow + delta)
+    }
+
+    /**
      * Clamps the selection range to the given dimensions.
      * Useful when the terminal is resized.
      */
