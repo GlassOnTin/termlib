@@ -377,6 +377,7 @@ fun Terminal(
      * on shells that don't emit OSC 133 (`133;A`/`B`/`D`).
      */
     tapToPositionCursorOnPrompt: Boolean = false,
+    onScrollControllerAvailable: ((ScrollController) -> Unit)? = null,
 ) {
     if (LocalInspectionMode.current) {
         TerminalPreview(modifier, backgroundColor, foregroundColor)
@@ -409,7 +410,7 @@ fun Terminal(
         rawKeyboardMode = rawKeyboardMode,
         customImeFlags = customImeFlags,
         onPasteShortcut = onPasteShortcut,
-        onScrollControllerAvailable = null,
+        onScrollControllerAvailable = onScrollControllerAvailable,
         onPasteRequest = onPasteRequest,
         rightAltMode = rightAltMode,
         selectionBackgroundColor = selectionBackgroundColor,

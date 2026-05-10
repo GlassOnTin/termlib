@@ -148,7 +148,71 @@ sealed interface TerminalEmulator {
      * list at call time.
      */
     fun getSnapshotLineTexts(): List<String>
+
+    /**
+     * Build a primitive-typed snapshot of the current terminal state for
+     * agent / automation transports. The internal `TerminalSnapshot`
+     * (and its `TerminalLine` / `SemanticSegment` collaborators) stay
+     * `internal` to termlib; this view is the public, stringly-typed
+     * surface meant for crossing module boundaries.
+     *
+     * Callers pass [includeSemanticSegments] = true when they need OSC
+     * 133 prompt markers (PROMPT / COMMAND_INPUT / COMMAND_OUTPUT /
+     * COMMAND_FINISHED / ANNOTATION) to drive prompt-aware features
+     * such as tap-to-position. [maxLines] caps how many top rows of
+     * `lines` are returned; the cursor position and dimensions are
+     * always present regardless of that cap.
+     */
+    fun buildAgentSnapshot(
+        includeSemanticSegments: Boolean = false,
+        maxLines: Int = Int.MAX_VALUE,
+    ): AgentSnapshot
+
+    /**
+     * Public entry point for the OSC 133 tap-to-position-cursor logic
+     * (the helper used by Terminal.kt's gesture handler when
+     * `tapToPositionCursorOnPrompt = true`). Cross-module callers
+     * (agent / MCP transport) use this to script the same code path
+     * without going through a touch event. Returns true when the tap
+     * landed on an OSC 133 input line and arrow-key dispatches were
+     * issued (or zero-delta no-op); false when no prompt was detected
+     * at the tap row.
+     */
+    fun tapToPositionCursorOnPrompt(tapRow: Int, tapCol: Int): Boolean
 }
+
+/**
+ * Primitive-typed view of [TerminalEmulator]'s state for cross-module
+ * consumers (agent / MCP transport, accessibility services, tests
+ * outside termlib). Mirrors fields from the internal `TerminalSnapshot`
+ * but uses only public types so callers don't need access to termlib's
+ * internal API.
+ */
+data class AgentSnapshot(
+    val rows: Int,
+    val cols: Int,
+    val cursorRow: Int,
+    val cursorCol: Int,
+    val cursorVisible: Boolean,
+    val terminalTitle: String,
+    val scrollbackSize: Int,
+    val lines: List<AgentLine>,
+)
+
+data class AgentLine(
+    val text: String,
+    val softWrapped: Boolean,
+    val semanticSegments: List<AgentSemanticSegment>,
+)
+
+data class AgentSemanticSegment(
+    val startCol: Int,
+    val endCol: Int,
+    /** One of: PROMPT, COMMAND_INPUT, COMMAND_OUTPUT, COMMAND_FINISHED, ANNOTATION. */
+    val type: String,
+    val promptId: Int,
+    val metadata: String?,
+)
 
 class TerminalEmulatorFactory {
     companion object {
@@ -418,6 +482,47 @@ internal class TerminalEmulatorImpl(
         val currentSnapshot = _snapshot.value
         val allLines = currentSnapshot.scrollback + currentSnapshot.lines
         return getLastCommandOutput(allLines)
+    }
+
+    override fun tapToPositionCursorOnPrompt(tapRow: Int, tapCol: Int): Boolean {
+        return dispatchTapToPositionCursor(this, _snapshot.value, tapRow, tapCol)
+    }
+
+    override fun buildAgentSnapshot(
+        includeSemanticSegments: Boolean,
+        maxLines: Int,
+    ): AgentSnapshot {
+        val snap = _snapshot.value
+        val cap = maxLines.coerceAtLeast(0)
+        val take = if (cap == Int.MAX_VALUE) snap.lines.size else minOf(cap, snap.lines.size)
+        val agentLines = snap.lines.take(take).map { line ->
+            val segs = if (includeSemanticSegments) {
+                line.semanticSegments.map { seg ->
+                    AgentSemanticSegment(
+                        startCol = seg.startCol,
+                        endCol = seg.endCol,
+                        type = seg.semanticType.name,
+                        promptId = seg.promptId,
+                        metadata = seg.metadata,
+                    )
+                }
+            } else emptyList()
+            AgentLine(
+                text = line.text,
+                softWrapped = line.softWrapped,
+                semanticSegments = segs,
+            )
+        }
+        return AgentSnapshot(
+            rows = snap.rows,
+            cols = snap.cols,
+            cursorRow = snap.cursorRow,
+            cursorCol = snap.cursorCol,
+            cursorVisible = snap.cursorVisible,
+            terminalTitle = snap.terminalTitle,
+            scrollbackSize = snap.scrollback.size,
+            lines = agentLines,
+        )
     }
 
     /**

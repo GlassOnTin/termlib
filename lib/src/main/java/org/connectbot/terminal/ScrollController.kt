@@ -19,7 +19,7 @@ package org.connectbot.terminal
 /**
  * Public API interface for controlling and monitoring scroll state in the terminal.
  */
-internal interface ScrollController {
+interface ScrollController {
     /**
      * The current scrollback position. 0 means we are at the bottom (showing the active screen).
      * Positive values indicate how many lines we have scrolled back into the history.
