@@ -368,6 +368,15 @@ fun Terminal(
     onPasteRequest: (() -> Unit)? = null,
     rightAltMode: RightAltMode = RightAltMode.CharacterModifier,
     delKeyMode: DelKeyMode = DelKeyMode.Delete,
+    /**
+     * When true, tapping inside the active OSC 133 prompt's input line
+     * synthesises arrow-key dispatches to move the shell's input cursor
+     * to the tapped column. Only fires when the cursor row has a
+     * `COMMAND_INPUT` segment with no matching `COMMAND_FINISHED`, and
+     * the viewport is at the bottom (not scrolled back). Has no effect
+     * on shells that don't emit OSC 133 (`133;A`/`B`/`D`).
+     */
+    tapToPositionCursorOnPrompt: Boolean = false,
 ) {
     if (LocalInspectionMode.current) {
         TerminalPreview(modifier, backgroundColor, foregroundColor)
@@ -406,6 +415,7 @@ fun Terminal(
         selectionBackgroundColor = selectionBackgroundColor,
         selectionForegroundColor = selectionForegroundColor,
         delKeyMode = delKeyMode,
+        tapToPositionCursorOnPrompt = tapToPositionCursorOnPrompt,
     )
 }
 
@@ -449,6 +459,7 @@ internal fun TerminalWithAccessibility(
     selectionBackgroundColor: Color = Color(0xFFB3D7FF),
     selectionForegroundColor: Color = Color.Black,
     delKeyMode: DelKeyMode = DelKeyMode.Delete,
+    tapToPositionCursorOnPrompt: Boolean = false,
 ) {
     if (terminalEmulator !is TerminalEmulatorImpl) {
         Box(
@@ -1511,17 +1522,40 @@ internal fun TerminalWithAccessibility(
                                         // Give callback chance to handle tap (mouse mode)
                                         val callbackHandled = gestureCallback?.onTap(tapCol, tapRow) == true
 
+                                        // Tap-to-position-cursor on an OSC 133 prompt input
+                                        // line: synthesise arrow-key dispatches so the
+                                        // shell's readline cursor lands at the tapped
+                                        // column. Only fires when not in mouse mode, the
+                                        // viewport is at the live bottom, and the cursor
+                                        // row's segments confirm we're between OSC 133;B
+                                        // and the next 133;D for that prompt. Focus still
+                                        // happens so the keyboard pops up for further
+                                        // typing; only the tap/double-tap callbacks are
+                                        // suppressed to avoid e.g. a fullscreen-toggle
+                                        // double-tap eating a quick double-click reposition.
+                                        val tapPositionedCursor = !callbackHandled &&
+                                            tapToPositionCursorOnPrompt &&
+                                            screenState.scrollbackPosition == 0 &&
+                                            dispatchTapToPositionCursor(
+                                                terminalEmulator,
+                                                screenState.snapshot,
+                                                tapRow,
+                                                tapCol,
+                                            )
+
                                         if (!callbackHandled) {
                                             if (keyboardEnabled) {
                                                 focusRequester.requestFocus()
                                             }
-                                            val now = System.currentTimeMillis()
-                                            if (now - lastTapTime < 300) {
-                                                onTerminalDoubleTap()
-                                                lastTapTime = 0L
-                                            } else {
-                                                onTerminalTap()
-                                                lastTapTime = now
+                                            if (!tapPositionedCursor) {
+                                                val now = System.currentTimeMillis()
+                                                if (now - lastTapTime < 300) {
+                                                    onTerminalDoubleTap()
+                                                    lastTapTime = 0L
+                                                } else {
+                                                    onTerminalTap()
+                                                    lastTapTime = now
+                                                }
                                             }
                                         }
                                     }

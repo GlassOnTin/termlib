@@ -468,6 +468,68 @@ internal fun getLastCommandOutput(lines: List<TerminalLine>): String? {
 }
 
 /**
+ * Translate a tap on a prompt input line into arrow-key dispatches that
+ * move the shell's readline cursor to the tapped column.
+ *
+ * Triggered by `Terminal.kt`'s tap handler when `tapToPositionCursorOnPrompt`
+ * is enabled and the viewport is at the live bottom (not scrolled back).
+ *
+ * Conservative detection — only acts when ALL of the following hold:
+ *  - The tap row is the same as the snapshot's reported cursor row.
+ *  - That row carries a `COMMAND_INPUT` semantic segment (meaning OSC 133;B
+ *    has fired since the last 133;A — we're past the prompt rendering).
+ *  - No `COMMAND_FINISHED` segment exists with a matching `promptId` in
+ *    either the visible screen or the scrollback (i.e. `133;D` hasn't
+ *    closed this command out yet).
+ *
+ * Together those conditions mean: a shell with OSC 133 prompt-marker
+ * support is currently waiting for input on the cursor row. Shells that
+ * don't emit OSC 133, and screen regions that aren't the active prompt,
+ * silently fall through.
+ *
+ * The target column is clamped to the prompt-input region's start
+ * (`inputSegment.startCol`) so taps on the prompt prefix (`user@host$ `)
+ * snap to the start of input rather than trying to walk the cursor into
+ * the static prompt text.
+ *
+ * @return `true` if cursor-positioning actually fired (arrow keys
+ *         dispatched, or zero-delta no-op), so the caller can skip the
+ *         normal tap/double-tap callbacks.
+ */
+internal fun dispatchTapToPositionCursor(
+    emulator: TerminalEmulator,
+    snapshot: TerminalSnapshot,
+    tapRow: Int,
+    tapCol: Int,
+): Boolean {
+    if (tapRow != snapshot.cursorRow) return false
+    val line = snapshot.lines.getOrNull(tapRow) ?: return false
+    val inputSegment = line.getSegmentsOfType(SemanticType.COMMAND_INPUT)
+        .firstOrNull() ?: return false
+
+    // Reject if this prompt's COMMAND_FINISHED already exists — means
+    // the shell has moved past this command (133;D fired). Walk both
+    // the visible screen and the scrollback because the finished marker
+    // typically lands on a row that scrolled off-viewport.
+    val matchingFinished = (snapshot.scrollback.asSequence() + snapshot.lines.asSequence())
+        .any { l ->
+            l.getSegmentsOfType(SemanticType.COMMAND_FINISHED)
+                .any { it.promptId == inputSegment.promptId }
+        }
+    if (matchingFinished) return false
+
+    val targetCol = tapCol.coerceAtLeast(inputSegment.startCol)
+    val delta = targetCol - snapshot.cursorCol
+    if (delta == 0) return true  // already there — still suppress default tap callbacks
+
+    val key = if (delta < 0) VTermKey.LEFT else VTermKey.RIGHT
+    repeat(kotlin.math.abs(delta)) {
+        emulator.dispatchKey(0, key)
+    }
+    return true
+}
+
+/**
  * Find the next line containing a specific semantic type.
  *
  * @param lines List of all terminal lines (scrollback + visible)
