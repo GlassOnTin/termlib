@@ -173,6 +173,10 @@ class TerminalEmulatorFactory {
          * @param boldAsBright Whether bold text using low-intensity ANSI colors (0–7) promotes to
          *                     the corresponding bright palette color (8–15), matching xterm's
          *                     default boldColors behavior. Defaults to true.
+         * @param maxScrollbackLines Maximum number of lines kept in the Kotlin-side scrollback
+         *                           ring before the oldest entries are evicted. Defaults to 1000;
+         *                           hosts that want a longer history (or want to expose the limit
+         *                           to users) can override.
          */
         fun create(
             looper: Looper = Looper.getMainLooper(),
@@ -188,6 +192,7 @@ class TerminalEmulatorFactory {
             enableAltScreen: Boolean = true,
             autoDetectUrls: Boolean = false,
             boldAsBright: Boolean = true,
+            maxScrollbackLines: Int = 1000,
         ): TerminalEmulator = TerminalEmulatorImpl(
             looper = looper,
             initialRows = initialRows,
@@ -202,6 +207,7 @@ class TerminalEmulatorFactory {
             enableAltScreen = enableAltScreen,
             autoDetectUrls = autoDetectUrls,
             boldAsBright = boldAsBright,
+            maxScrollbackLines = maxScrollbackLines,
         )
     }
 }
@@ -250,6 +256,7 @@ internal class TerminalEmulatorImpl(
     private val enableAltScreen: Boolean = true,
     override val autoDetectUrls: Boolean = false,
     override val boldAsBright: Boolean = true,
+    maxScrollbackLines: Int = 1000,
 ) : TerminalEmulator,
     TerminalCallbacks {
 
@@ -301,7 +308,7 @@ internal class TerminalEmulatorImpl(
 
     // Scrollback buffer
     private val scrollback = mutableListOf<TerminalLine>()
-    private val maxScrollbackLines = 1000
+    private val maxScrollbackLines: Int = maxScrollbackLines.coerceAtLeast(0)
 
     // Cached immutable copy of scrollback - only recreate when scrollback changes
     private var scrollbackSnapshot: List<TerminalLine> = emptyList()
