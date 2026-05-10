@@ -107,6 +107,22 @@ interface SelectionController {
      * or null if no selection is active.
      */
     fun getSelectionRange(): SelectionRange?
+
+    /**
+     * Returns the currently selected text, with soft-wrapped lines rejoined
+     * using libvterm's authoritative `softWrapped` flag (no clipboard write,
+     * no selection clear). Returns "" when nothing is selected.
+     *
+     * Default implementation returns "" so existing test doubles compile;
+     * the real implementation in [Terminal] forwards to
+     * [SelectionManager.getSelectedText] with the live snapshot and
+     * scrollback position. Callers that need the selection's logical text
+     * (smartCopy, copy-button handlers, OSC 52 emitters) should prefer this
+     * over re-extracting from the snapshot themselves — the column-length
+     * heuristic for "did this line wrap?" is unreliable when row text is
+     * NUL-padded or lines exactly fill the viewport.
+     */
+    fun getSelectedText(): String = ""
 }
 
 sealed class SelectionMode {

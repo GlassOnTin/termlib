@@ -719,6 +719,13 @@ internal fun TerminalWithAccessibility(
             override fun getSelectionRange(): SelectionRange? {
                 return selectionManager.selectionRange
             }
+
+            override fun getSelectedText(): String {
+                return selectionManager.getSelectedText(
+                    screenState.snapshot,
+                    screenState.scrollbackPosition,
+                )
+            }
         }
     }
 
