@@ -739,6 +739,10 @@ internal fun TerminalWithAccessibility(
                     screenState.scrollbackPosition,
                 )
             }
+
+            override fun shiftSelectionStartByRows(delta: Int) {
+                selectionManager.shiftSelectionStartByRows(delta)
+            }
         }
     }
 

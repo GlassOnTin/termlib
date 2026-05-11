@@ -123,6 +123,26 @@ interface SelectionController {
      * NUL-padded or lines exactly fill the viewport.
      */
     fun getSelectedText(): String = ""
+
+    /**
+     * Shift the selection's start anchor's row by [delta]. Used by the
+     * Compose gesture handler during drag-extend with edge-zone
+     * auto-scroll (see Terminal.kt GestureType.Selection): each scroll
+     * step is paired with a `+1` (top edge) or `-1` (bottom edge) shift
+     * so the anchor tracks its logical content line while the viewport
+     * scrolls under the finger. Also reachable from the MCP transport
+     * via `drag_selection_to`, which composes one step of this with
+     * [ScrollController.scrollBy] per requested logical-row of scroll.
+     *
+     * No clamping — `range.startRow` may legitimately go outside
+     * `[0, rows-1]` while the anchor's content has scrolled off-viewport
+     * on either side. [SelectionManager.getSelectedText] resolves rows
+     * outside the viewport via `getSnapshotLine`, so text extraction
+     * stays correct.
+     *
+     * Default implementation is a no-op so existing test doubles compile.
+     */
+    fun shiftSelectionStartByRows(delta: Int) {}
 }
 
 sealed class SelectionMode {
