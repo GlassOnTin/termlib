@@ -90,7 +90,16 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.runtime.mutableFloatStateOf
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.view.InputDevice
+import android.view.MotionEvent
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -170,6 +179,13 @@ private const val SCROLL_THRESHOLD_PX = 24f
  * when dragging selection near the boundary.
  */
 private const val EDGE_SCROLL_ZONE = 0.12f
+
+/**
+ * Interval between auto-repeat edge-scroll ticks while a drag is held still
+ * inside the edge zone. The pointer-event loop only fires while the finger
+ * moves; this tick covers a finger held stationary at the edge.
+ */
+private const val EDGE_SCROLL_TICK_MS = 60L
 
 /**
  * Text selection magnifier loupe size in dp.
@@ -379,6 +395,13 @@ fun Terminal(
      */
     tapToPositionCursorOnPrompt: Boolean = false,
     onScrollControllerAvailable: ((ScrollController) -> Unit)? = null,
+    /**
+     * Optional callback handed a [GestureInjector] once the terminal is
+     * composed. Lets a test harness drive synthetic touch gestures
+     * through the real pointer pipeline. Production callers leave this
+     * null.
+     */
+    onGestureInjectorReady: ((GestureInjector) -> Unit)? = null,
 ) {
     if (LocalInspectionMode.current) {
         TerminalPreview(modifier, backgroundColor, foregroundColor)
@@ -418,6 +441,7 @@ fun Terminal(
         selectionForegroundColor = selectionForegroundColor,
         delKeyMode = delKeyMode,
         tapToPositionCursorOnPrompt = tapToPositionCursorOnPrompt,
+        onGestureInjectorReady = onGestureInjectorReady,
     )
 }
 
@@ -461,6 +485,7 @@ internal fun TerminalWithAccessibility(
     selectionBackgroundColor: Color = Color(0xFFB3D7FF),
     selectionForegroundColor: Color = Color.Black,
     delKeyMode: DelKeyMode = DelKeyMode.Delete,
+    onGestureInjectorReady: ((GestureInjector) -> Unit)? = null,
     tapToPositionCursorOnPrompt: Boolean = false,
 ) {
     if (terminalEmulator !is TerminalEmulatorImpl) {
@@ -836,6 +861,88 @@ internal fun TerminalWithAccessibility(
         onScrollControllerAvailable?.invoke(scrollController)
     }
 
+    // Synthetic-gesture injection. Captured live so the injector reads
+    // the current terminal geometry at injectDrag time rather than at
+    // composition time: the content Box reports its window-root origin
+    // via onGloballyPositioned below, and a SideEffect mirrors the char
+    // metrics (which change on font-size / pinch zoom).
+    val hostView = LocalView.current
+    var contentOriginInRoot by remember { mutableStateOf(Offset.Zero) }
+    val injectorCharWidth = remember { mutableFloatStateOf(0f) }
+    val injectorCharHeight = remember { mutableFloatStateOf(0f) }
+    SideEffect {
+        injectorCharWidth.floatValue = baseCharWidth
+        injectorCharHeight.floatValue = baseCharHeight
+    }
+    val gestureInjector = remember(hostView) {
+        object : GestureInjector {
+            override fun injectDrag(
+                path: List<Pair<Int, Int>>,
+                pressMs: Long,
+                stepMs: Long,
+                holdMs: Long,
+            ) {
+                require(path.isNotEmpty()) { "path must have at least one cell" }
+                check(Looper.myLooper() != Looper.getMainLooper()) {
+                    "injectDrag must not be called on the main thread — it blocks"
+                }
+                val origin = contentOriginInRoot
+                val cw = injectorCharWidth.floatValue
+                val ch = injectorCharHeight.floatValue
+                check(cw > 0f && ch > 0f) { "terminal geometry not measured yet" }
+
+                fun cellX(col: Int) = origin.x + (col + 0.5f) * cw
+                fun cellY(row: Int) = origin.y + (row + 0.5f) * ch
+
+                val handler = Handler(Looper.getMainLooper())
+                val latch = java.util.concurrent.CountDownLatch(1)
+                val downTime = SystemClock.uptimeMillis()
+
+                fun dispatch(action: Int, offset: Long, cell: Pair<Int, Int>) {
+                    val ev = MotionEvent.obtain(
+                        downTime,
+                        downTime + offset,
+                        action,
+                        cellX(cell.second),
+                        cellY(cell.first),
+                        0,
+                    )
+                    ev.source = InputDevice.SOURCE_TOUCHSCREEN
+                    try {
+                        hostView.dispatchTouchEvent(ev)
+                    } finally {
+                        ev.recycle()
+                    }
+                }
+
+                // DOWN, then a still-hold so the long-press selection
+                // timeout fires; MOVEs through the path; a still-hold at
+                // the end (the edge-scroll ticker's window); UP.
+                handler.post { dispatch(MotionEvent.ACTION_DOWN, 0L, path[0]) }
+                var offset = pressMs
+                for (i in 1 until path.size) {
+                    val at = offset
+                    val cell = path[i]
+                    handler.postDelayed({ dispatch(MotionEvent.ACTION_MOVE, at, cell) }, at)
+                    offset += stepMs
+                }
+                // offset now points just past the last MOVE (or == pressMs
+                // when path has a single cell). Hold, then lift.
+                val upOffset = (offset - stepMs).coerceAtLeast(pressMs) + holdMs
+                handler.postDelayed({
+                    dispatch(MotionEvent.ACTION_UP, upOffset, path.last())
+                    latch.countDown()
+                }, upOffset)
+
+                // Block the caller until the gesture finishes (plus slack).
+                latch.await(upOffset + 3000L, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
+        }
+    }
+    LaunchedEffect(gestureInjector) {
+        onGestureInjectorReady?.invoke(gestureInjector)
+    }
+
     // Sync compose mode active state to ImeInputView so onCreateInputConnection returns the
     // correct outAttrs (and restartInput is called to apply the change).
     LaunchedEffect(composeMode.isActive, imeInputView) {
@@ -1022,12 +1129,19 @@ internal fun TerminalWithAccessibility(
             }
         }
 
+        // True while a selection handle is being dragged. Like
+        // selectionManager.isSelecting for the long-press path, this tells the
+        // scrollback LaunchedEffect below to leave the anchors alone — the
+        // handle-drag edge-scroll ticker shifts them explicitly instead.
+        var handleDragActive by remember { mutableStateOf(false) }
+
         // Keep an existing (non-actively-extending) selection anchored on
         // its logical lines while the viewport scrolls. Mirrors the
         // desktop-terminal behaviour where scrolling never disturbs the
         // current selection. Skipped while the user is mid-drag-extend
-        // (selectionManager.isSelecting) — the gesture handler manages
-        // the start anchor explicitly there to avoid double-shifting.
+        // (selectionManager.isSelecting) or dragging a handle
+        // (handleDragActive) — the gesture handler manages the anchors
+        // explicitly there to avoid double-shifting.
         var lastScrollbackPos by remember { mutableIntStateOf(screenState.scrollbackPosition) }
         LaunchedEffect(screenState.scrollbackPosition) {
             val newPos = screenState.scrollbackPosition
@@ -1035,7 +1149,8 @@ internal fun TerminalWithAccessibility(
             lastScrollbackPos = newPos
             if (delta != 0 &&
                 selectionManager.mode != SelectionMode.NONE &&
-                !selectionManager.isSelecting
+                !selectionManager.isSelecting &&
+                !handleDragActive
             ) {
                 selectionManager.shiftSelectionByRows(delta)
             }
@@ -1060,7 +1175,9 @@ internal fun TerminalWithAccessibility(
                     )
             } else {
                 Modifier.fillMaxSize()
-            }).pointerInput(terminalEmulator, gestureCallback) {
+            })
+                .onGloballyPositioned { contentOriginInRoot = it.positionInRoot() }
+                .pointerInput(terminalEmulator, gestureCallback) {
                 val touchSlopSquared =
                     viewConfiguration.touchSlop * viewConfiguration.touchSlop
                 var lastMultiTouchTime = 0L
@@ -1089,41 +1206,88 @@ internal fun TerminalWithAccessibility(
                                     // Handle drag
                                     showMagnifier = true
                                     magnifierPosition = down.position
+                                    handleDragActive = true
 
                                     // Local variable to keep track of which handle we are moving in case they cross
                                     var isMovingStart = touchingStart
+                                    // Latest pointer position, fed to the
+                                    // edge-scroll ticker below.
+                                    var handleDragPosition = down.position
 
-                                    drag(down.id) { change ->
+                                    // Re-place the dragged handle at the current
+                                    // pointer position. Shared by the drag loop and
+                                    // the edge-scroll ticker.
+                                    fun applyHandleAt(pos: Offset) {
                                         val newCol =
-                                            (change.position.x / baseCharWidth).toInt()
+                                            (pos.x / baseCharWidth).toInt()
                                                 .coerceIn(0, screenState.snapshot.cols - 1)
                                         val newRow =
-                                            (change.position.y / baseCharHeight).toInt()
+                                            (pos.y / baseCharHeight).toInt()
                                                 .coerceIn(0, screenState.snapshot.rows - 1)
 
                                         val current = selectionManager.selectionRange
-                                        if (current != null) {
-                                            val result = applyHandleDrag(
-                                                startRow = current.startRow,
-                                                startCol = current.startCol,
-                                                endRow = current.endRow,
-                                                endCol = current.endCol,
-                                                isMovingStart = isMovingStart,
-                                                newRow = newRow,
-                                                newCol = newCol,
-                                            )
-                                            isMovingStart = result.isMovingStart
-                                            selectionManager.updateSelectionStart(result.startRow, result.startCol)
-                                            selectionManager.updateSelectionEnd(result.endRow, result.endCol)
-                                            selectionManager.adjustSelectionForMode(
-                                                screenState.snapshot.cols,
-                                                screenState.snapshot,
-                                                screenState.scrollbackPosition,
-                                            )
-                                        }
+                                            ?: return
+                                        val result = applyHandleDrag(
+                                            startRow = current.startRow,
+                                            startCol = current.startCol,
+                                            endRow = current.endRow,
+                                            endCol = current.endCol,
+                                            isMovingStart = isMovingStart,
+                                            newRow = newRow,
+                                            newCol = newCol,
+                                        )
+                                        isMovingStart = result.isMovingStart
+                                        selectionManager.updateSelectionStart(result.startRow, result.startCol)
+                                        selectionManager.updateSelectionEnd(result.endRow, result.endCol)
+                                        selectionManager.adjustSelectionForMode(
+                                            screenState.snapshot.cols,
+                                            screenState.snapshot,
+                                            screenState.scrollbackPosition,
+                                        )
+                                    }
 
-                                        magnifierPosition = change.position
-                                        change.consume()
+                                    // Auto-repeat edge-scroll while the handle sits
+                                    // in the top/bottom edge zone. Unlike the
+                                    // Selection/MouseDrag paths there is no inline
+                                    // edge-scroll for handle drags, so this ticker is
+                                    // the sole driver and runs whether the handle is
+                                    // moving or held still. The scrollback
+                                    // LaunchedEffect is gated off via handleDragActive,
+                                    // so shift both anchors here to keep the selection
+                                    // pinned to its content, then re-place the dragged
+                                    // handle under the (possibly stationary) finger. (#94)
+                                    val handleEdgeScrollJob = launch {
+                                        while (true) {
+                                            delay(EDGE_SCROLL_TICK_MS)
+                                            if (selectionManager.selectionRange == null) continue
+                                            val viewportH =
+                                                screenState.snapshot.rows * baseCharHeight
+                                            val dir = edgeScrollDirection(
+                                                handleDragPosition.y, viewportH,
+                                                screenState.scrollbackPosition,
+                                                screenState.snapshot.scrollback.size,
+                                            )
+                                            if (dir == EdgeScroll.NONE) continue
+                                            val delta = if (dir == EdgeScroll.UP) +1 else -1
+                                            screenState.scrollBy(delta)
+                                            selectionManager.shiftSelectionByRows(delta)
+                                            scrollOffset.snapTo(
+                                                screenState.scrollbackPosition * baseCharHeight
+                                            )
+                                            applyHandleAt(handleDragPosition)
+                                        }
+                                    }
+
+                                    try {
+                                        drag(down.id) { change ->
+                                            handleDragPosition = change.position
+                                            applyHandleAt(change.position)
+                                            magnifierPosition = change.position
+                                            change.consume()
+                                        }
+                                    } finally {
+                                        handleEdgeScrollJob.cancel()
+                                        handleDragActive = false
                                     }
 
                                     // After lifting finger, ensure selection is fully adjusted and handles snap
@@ -1242,6 +1406,73 @@ internal fun TerminalWithAccessibility(
                         // used to quantize per-pixel events down to per-cell.
                         var lastMouseDragCol = -1
                         var lastMouseDragRow = -1
+                        // Latest pointer position + timestamp, fed to the
+                        // held-still edge-scroll ticker below.
+                        var lastDragPosition = down.position
+                        var lastDragEventTime = 0L
+
+                        // Auto-repeat edge-scroll for a finger held still in the
+                        // edge zone. The pointer-event loop only fires while the
+                        // finger moves; this ticker covers the stationary case for
+                        // Selection and MouseDrag. Cancelled in section 6. (#94)
+                        val edgeAutoScrollJob = launch {
+                            while (true) {
+                                delay(EDGE_SCROLL_TICK_MS)
+                                // If a pointer event arrived within the last tick the
+                                // inline edge-scroll already handled it — only act as
+                                // the held-still fallback.
+                                if (System.currentTimeMillis() - lastDragEventTime <
+                                    EDGE_SCROLL_TICK_MS
+                                ) {
+                                    continue
+                                }
+                                val viewportH = screenState.snapshot.rows * baseCharHeight
+                                if (viewportH <= 0f) continue
+                                val dragCol = (lastDragPosition.x / baseCharWidth).toInt()
+                                    .coerceIn(0, screenState.snapshot.cols - 1)
+                                val dragRow = (lastDragPosition.y / baseCharHeight).toInt()
+                                    .coerceIn(0, screenState.snapshot.rows - 1)
+                                when (gestureType) {
+                                    GestureType.Selection -> {
+                                        if (!selectionManager.isSelecting) continue
+                                        val dir = edgeScrollDirection(
+                                            lastDragPosition.y, viewportH,
+                                            screenState.scrollbackPosition,
+                                            screenState.snapshot.scrollback.size,
+                                        )
+                                        if (dir == EdgeScroll.NONE) continue
+                                        // Mouse-mode selections forward the wheel event;
+                                        // native selections scroll our own viewport and
+                                        // shift the start anchor in lockstep.
+                                        val handled = gestureCallback
+                                            ?.onScroll(dragCol, dragRow, dir == EdgeScroll.UP)
+                                            ?: false
+                                        if (!handled) {
+                                            val delta = if (dir == EdgeScroll.UP) +1 else -1
+                                            screenState.scrollBy(delta)
+                                            selectionManager.shiftSelectionStartByRows(delta)
+                                            scrollOffset.snapTo(
+                                                screenState.scrollbackPosition * baseCharHeight
+                                            )
+                                        }
+                                        selectionManager.updateSelection(dragRow, dragCol)
+                                    }
+                                    GestureType.MouseDrag -> {
+                                        // Mouse-mode forwards wheel events to the remote
+                                        // regardless of our own scrollback depth — mirror
+                                        // the inline MouseDrag edge check (zone only).
+                                        val cb = gestureCallback ?: continue
+                                        val relY = lastDragPosition.y / viewportH
+                                        if (relY < EDGE_SCROLL_ZONE) {
+                                            cb.onScroll(dragCol, dragRow, true)
+                                        } else if (relY > 1f - EDGE_SCROLL_ZONE) {
+                                            cb.onScroll(dragCol, dragRow, false)
+                                        }
+                                    }
+                                    else -> {}
+                                }
+                            }
+                        }
 
                         while (true) {
                             val event: PointerEvent =
@@ -1256,6 +1487,11 @@ internal fun TerminalWithAccessibility(
                             // Use raw position delta — positionChange() may return
                             // zero if pagerSwipeOverride consumed on Initial pass.
                             val dragAmount = change.position - change.previousPosition
+
+                            // Feed the held-still edge-scroll ticker the latest
+                            // pointer position and timestamp.
+                            lastDragPosition = change.position
+                            lastDragEventTime = System.currentTimeMillis()
 
                             // Determine gesture if still undetermined.
                             // Use total distance from touch-down (not per-frame delta)
@@ -1452,6 +1688,7 @@ internal fun TerminalWithAccessibility(
                         gestureEnded = true
                         longPressJob.cancel()
                         callbackLongPressJob?.cancel()
+                        edgeAutoScrollJob.cancel()
                         when (gestureType) {
                             GestureType.Scroll -> {
                                 // Flush any remaining accumulated scroll that didn't
@@ -2155,6 +2392,32 @@ private fun DrawScope.drawCurlyUnderline(
             isAntiAlias = true
         },
     )
+}
+
+/** Which way an edge-held drag should scroll the viewport, if at all. */
+internal enum class EdgeScroll { NONE, UP, DOWN }
+
+/**
+ * Decides whether a pointer held at [posY] within a viewport of [viewportHeightPx]
+ * is inside the top/bottom edge zone and has scrollback room to move that way.
+ *
+ * UP means scroll toward older content (increasing scrollbackPosition); DOWN means
+ * toward the live bottom. Returns NONE in the middle or when already at the limit.
+ */
+internal fun edgeScrollDirection(
+    posY: Float,
+    viewportHeightPx: Float,
+    scrollbackPosition: Int,
+    maxScrollback: Int,
+    edgeZone: Float = EDGE_SCROLL_ZONE,
+): EdgeScroll {
+    if (viewportHeightPx <= 0f) return EdgeScroll.NONE
+    val relY = posY / viewportHeightPx
+    return when {
+        relY < edgeZone && scrollbackPosition < maxScrollback -> EdgeScroll.UP
+        relY > 1f - edgeZone && scrollbackPosition > 0 -> EdgeScroll.DOWN
+        else -> EdgeScroll.NONE
+    }
 }
 
 /**
