@@ -188,6 +188,15 @@ private const val EDGE_SCROLL_ZONE = 0.12f
 private const val EDGE_SCROLL_TICK_MS = 60L
 
 /**
+ * Cap on rows scrolled per [EDGE_SCROLL_TICK_MS] tick. The finger position
+ * within the edge zone scales the actual rows-per-tick from 1 (just inside
+ * the zone boundary) up to this cap (against the screen edge), so dragging
+ * deeper into the edge accelerates the scroll. At the cap, ≈130 rows/sec.
+ * Issue #94 — ehoeve786 wanted scrolling to accelerate by finger position.
+ */
+private const val MAX_EDGE_SCROLL_ROWS = 8
+
+/**
  * Text selection magnifier loupe size in dp.
  */
 private const val MAGNIFIER_SIZE_DP = 100
@@ -1268,7 +1277,16 @@ internal fun TerminalWithAccessibility(
                                                 screenState.snapshot.scrollback.size,
                                             )
                                             if (dir == EdgeScroll.NONE) continue
-                                            val delta = if (dir == EdgeScroll.UP) +1 else -1
+                                            // Velocity scales with how deep the
+                                            // finger is in the edge zone — at the
+                                            // inner edge of the zone the scroll
+                                            // rate matches the old fixed 1 row/tick,
+                                            // at the screen edge it caps at
+                                            // MAX_EDGE_SCROLL_ROWS rows/tick.
+                                            val rows = edgeScrollRowsPerTick(
+                                                handleDragPosition.y, viewportH, dir,
+                                            )
+                                            val delta = if (dir == EdgeScroll.UP) +rows else -rows
                                             screenState.scrollBy(delta)
                                             selectionManager.shiftSelectionByRows(delta)
                                             scrollOffset.snapTo(
@@ -1448,7 +1466,10 @@ internal fun TerminalWithAccessibility(
                                             ?.onScroll(dragCol, dragRow, dir == EdgeScroll.UP)
                                             ?: false
                                         if (!handled) {
-                                            val delta = if (dir == EdgeScroll.UP) +1 else -1
+                                            val rows = edgeScrollRowsPerTick(
+                                                lastDragPosition.y, viewportH, dir,
+                                            )
+                                            val delta = if (dir == EdgeScroll.UP) +rows else -rows
                                             screenState.scrollBy(delta)
                                             selectionManager.shiftSelectionStartByRows(delta)
                                             scrollOffset.snapTo(
@@ -2418,6 +2439,36 @@ internal fun edgeScrollDirection(
         relY > 1f - edgeZone && scrollbackPosition > 0 -> EdgeScroll.DOWN
         else -> EdgeScroll.NONE
     }
+}
+
+/**
+ * Rows-per-tick to scroll given the finger's depth into the edge zone.
+ *
+ *  - At the boundary between the edge zone and the live viewport: 1 row/tick
+ *    (matches the old fixed behaviour).
+ *  - At the screen edge (top 0 or bottom 1): caps at [MAX_EDGE_SCROLL_ROWS].
+ *  - Outside the edge zone: 0 — callers normally guard with
+ *    [edgeScrollDirection] first.
+ *
+ * Always returns a positive count; the caller applies the sign based on the
+ * direction it got from [edgeScrollDirection]. Issue #94.
+ */
+internal fun edgeScrollRowsPerTick(
+    posY: Float,
+    viewportHeightPx: Float,
+    dir: EdgeScroll,
+    edgeZone: Float = EDGE_SCROLL_ZONE,
+    maxRows: Int = MAX_EDGE_SCROLL_ROWS,
+): Int {
+    if (dir == EdgeScroll.NONE || viewportHeightPx <= 0f) return 0
+    val relY = posY / viewportHeightPx
+    val depth = when (dir) {
+        EdgeScroll.UP -> ((edgeZone - relY) / edgeZone).coerceIn(0f, 1f)
+        EdgeScroll.DOWN -> ((relY - (1f - edgeZone)) / edgeZone).coerceIn(0f, 1f)
+        EdgeScroll.NONE -> 0f
+    }
+    // Linear ramp from 1 row/tick at zone boundary to maxRows at screen edge.
+    return 1 + (depth * (maxRows - 1)).toInt().coerceIn(0, maxRows - 1)
 }
 
 /**

@@ -83,4 +83,59 @@ class EdgeScrollTest {
             edgeScrollDirection(posY = 0f, viewportHeightPx = 0f, scrollbackPosition = 0, maxScrollback = 100),
         )
     }
+
+    // --- edgeScrollRowsPerTick (issue #94 — depth-based velocity scaling) ---
+
+    @Test
+    fun rowsPerTick_justInsideTopZone_isOne() {
+        // posY = 119 -> relY = 0.119, depth = (0.12 - 0.119) / 0.12 ≈ 0.008 → 1 row.
+        assertEquals(
+            1,
+            edgeScrollRowsPerTick(posY = 119f, viewportHeightPx = 1000f, dir = EdgeScroll.UP),
+        )
+    }
+
+    @Test
+    fun rowsPerTick_atTopEdge_capsAtMax() {
+        // posY = 0 -> relY = 0.0, depth = 1.0 → 1 + 7 = 8 rows (cap).
+        assertEquals(
+            8,
+            edgeScrollRowsPerTick(posY = 0f, viewportHeightPx = 1000f, dir = EdgeScroll.UP),
+        )
+    }
+
+    @Test
+    fun rowsPerTick_halfwayIntoTopZone_isMidValue() {
+        // posY = 60 -> relY = 0.06, depth = (0.12 - 0.06) / 0.12 = 0.5 → 1 + 3 = 4 rows.
+        assertEquals(
+            4,
+            edgeScrollRowsPerTick(posY = 60f, viewportHeightPx = 1000f, dir = EdgeScroll.UP),
+        )
+    }
+
+    @Test
+    fun rowsPerTick_atBottomEdge_capsAtMax() {
+        // posY = 1000 -> relY = 1.0, depth = (1.0 - 0.88) / 0.12 = 1.0 → 8 rows.
+        assertEquals(
+            8,
+            edgeScrollRowsPerTick(posY = 1000f, viewportHeightPx = 1000f, dir = EdgeScroll.DOWN),
+        )
+    }
+
+    @Test
+    fun rowsPerTick_outsideEdgeZone_isZero() {
+        // Callers normally guard with edgeScrollDirection(), but defend.
+        assertEquals(
+            0,
+            edgeScrollRowsPerTick(posY = 500f, viewportHeightPx = 1000f, dir = EdgeScroll.NONE),
+        )
+    }
+
+    @Test
+    fun rowsPerTick_zeroViewport_isZero() {
+        assertEquals(
+            0,
+            edgeScrollRowsPerTick(posY = 0f, viewportHeightPx = 0f, dir = EdgeScroll.UP),
+        )
+    }
 }
