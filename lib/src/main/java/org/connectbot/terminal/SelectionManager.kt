@@ -413,17 +413,19 @@ internal class SelectionManager {
      * Resolves a viewport-relative `row` (i.e., the row coordinate emitted by
      * the gesture handler at tap-time) to the underlying [TerminalLine].
      *
-     * For a viewport of `snapshot.rows` height scrolled back by
-     * `scrollbackPosition` lines, visible rows [0, scrollbackPosition) show
-     * scrollback, and visible rows [scrollbackPosition, rows) show the top
-     * portion of the current screen. The old implementation assumed any row
-     * when scrolled back came from scrollback — which silently returned null
-     * for rows that mapped to the current screen, breaking word-boundary
-     * expansion and text extraction on those rows.
+     * Visible rows in `[0, scrollbackPosition)` show scrollback, and visible
+     * rows in `[scrollbackPosition, rows)` show the top portion of the current
+     * screen. `row` may legitimately fall outside `[0, rows)` when
+     * [shiftSelectionStartByRows] has tracked an anchor whose content has
+     * scrolled off the viewport during a drag-extend with edge auto-scroll
+     * (issue #94). In that case the row still maps to a valid scrollback or
+     * screen line via the unified index formula below, so we use it for every
+     * scrollbackPosition (including 0 — the live-tail case where a negative
+     * `row` points into the most recent scrollback).
      */
     private fun getSnapshotLine(snapshot: TerminalSnapshot, row: Int, scrollbackPosition: Int = 0): TerminalLine? {
-        if (scrollbackPosition <= 0) return snapshot.lines.getOrNull(row)
-        val actualIndex = snapshot.scrollback.size - scrollbackPosition + row
+        val sbPos = scrollbackPosition.coerceAtLeast(0)
+        val actualIndex = snapshot.scrollback.size - sbPos + row
         return if (actualIndex < snapshot.scrollback.size) {
             snapshot.scrollback.getOrNull(actualIndex)
         } else {

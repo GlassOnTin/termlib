@@ -565,6 +565,144 @@ class SelectionManagerTest {
         assertEquals(SelectionMode.NONE, selectionManager.mode)
     }
 
+    /**
+     * Build a snapshot whose `scrollback` carries the first N-rows of
+     * [content] and whose active screen ([lines]) carries the rest.
+     * Helpful for issue-#94 follow-up tests where a selection spans both
+     * scrollback and the live screen.
+     */
+    private fun makeSnapshotWithScrollback(
+        scrollbackText: List<String>,
+        screenText: List<String>,
+        cols: Int,
+    ): TerminalSnapshot {
+        fun lineOf(text: String, rowIndex: Int): TerminalLine {
+            val padded = text.padEnd(cols, ' ')
+            return TerminalLine(
+                row = rowIndex,
+                cells = padded.map { cell(it) },
+            )
+        }
+        val scrollback = scrollbackText.mapIndexed { i, t -> lineOf(t, i) }
+        val screen = screenText.mapIndexed { i, t -> lineOf(t, scrollbackText.size + i) }
+        return TerminalSnapshot(
+            lines = screen,
+            scrollback = scrollback,
+            cursorRow = screen.lastIndex.coerceAtLeast(0),
+            cursorCol = 0,
+            cursorVisible = true,
+            cursorBlink = true,
+            cursorShape = CursorShape.BLOCK,
+            terminalTitle = "",
+            rows = screen.size,
+            cols = cols,
+            timestamp = System.currentTimeMillis(),
+            sequenceNumber = 1L,
+        )
+    }
+
+    /**
+     * Issue #94 follow-up — when the user drags-to-select and edge-scroll
+     * auto-scroll pushes the anchor off the top of the viewport,
+     * [SelectionManager.shiftSelectionStartByRows] sets `startRow` negative
+     * while live-tailing (`scrollbackPosition == 0`). Pre-fix,
+     * `getSnapshotLine` short-circuited to `snapshot.lines.getOrNull(row)`
+     * for the live-tail case, returning null on negative rows and
+     * `getSelectedText` silently dropped those rows. The clipboard ended up
+     * with only the on-screen portion of the selection.
+     */
+    @Test
+    fun testGetSelectedTextSpansOffViewportTopWhileLiveTailing() {
+        // 3 lines of scrollback above, 3 lines of screen below.
+        val snapshot = makeSnapshotWithScrollback(
+            scrollbackText = listOf("old-3", "old-2", "old-1"),
+            screenText = listOf("scr-0", "scr-1", "scr-2"),
+            cols = 5,
+        )
+
+        // Selection: anchor was at screen row 0, user dragged finger off the
+        // top edge; shiftSelectionStartByRows pulled startRow to -2 (i.e. two
+        // rows into scrollback).
+        selectionManager.startSelection(0, 0, cols = 5, mode = SelectionMode.CHARACTER)
+        selectionManager.shiftSelectionStartByRows(-2)
+        selectionManager.updateSelection(0, 4)
+        selectionManager.endSelection()
+
+        val text = selectionManager.getSelectedText(snapshot, scrollbackPosition = 0)
+        // Three rows should be present: "old-2", "old-1", "scr-0".
+        assertEquals("old-2\nold-1\nscr-0", text)
+    }
+
+    /**
+     * Same shape as the live-tailing case but with the user already
+     * scrolled back into history. `scrollbackPosition > 0`; the anchor
+     * has drifted further into older scrollback via repeated edge-scroll.
+     */
+    @Test
+    fun testGetSelectedTextSpansOffViewportTopWhileScrolledBack() {
+        val snapshot = makeSnapshotWithScrollback(
+            scrollbackText = listOf("old-4", "old-3", "old-2", "old-1"),
+            screenText = listOf("scr-0", "scr-1", "scr-2"),
+            cols = 5,
+        )
+
+        // Viewport is scrolled back by 2 rows: visible rows are
+        //   row 0 -> scrollback[size-2] = "old-2"
+        //   row 1 -> scrollback[size-1] = "old-1"
+        //   row 2 -> lines[0]           = "scr-0"
+        // Anchor started at row 0, then shifted -2 (further into history).
+        selectionManager.startSelection(0, 0, cols = 5, mode = SelectionMode.CHARACTER)
+        selectionManager.shiftSelectionStartByRows(-2)
+        selectionManager.updateSelection(1, 4)
+        selectionManager.endSelection()
+
+        val text = selectionManager.getSelectedText(snapshot, scrollbackPosition = 2)
+        // Should produce "old-4\nold-3\nold-2\nold-1".
+        assertEquals("old-4\nold-3\nold-2\nold-1", text)
+    }
+
+    /**
+     * Sanity check: a wholly on-screen selection is unaffected by the
+     * #94 fix (was the dominant code path before; must not regress).
+     */
+    @Test
+    fun testGetSelectedTextOnScreenOnlyUnchanged() {
+        val snapshot = makeSnapshotWithScrollback(
+            scrollbackText = listOf("old-1"),
+            screenText = listOf("scr-0", "scr-1", "scr-2"),
+            cols = 5,
+        )
+
+        selectionManager.startSelection(0, 0, cols = 5, mode = SelectionMode.CHARACTER)
+        selectionManager.updateSelection(1, 4)
+        selectionManager.endSelection()
+
+        val text = selectionManager.getSelectedText(snapshot, scrollbackPosition = 0)
+        assertEquals("scr-0\nscr-1", text)
+    }
+
+    /**
+     * Past-the-end rows (row >= rows after a downward shift) must resolve
+     * to null cleanly — extraction skips them rather than crashing. This
+     * locks the contract for the symmetric case to the bug above.
+     */
+    @Test
+    fun testGetSelectedTextSkipsRowsPastScreenBottom() {
+        val snapshot = makeSnapshotWithScrollback(
+            scrollbackText = emptyList(),
+            screenText = listOf("scr-0", "scr-1"),
+            cols = 5,
+        )
+
+        selectionManager.startSelection(0, 0, cols = 5, mode = SelectionMode.CHARACTER)
+        // endRow > snapshot.rows; only existing rows should be emitted.
+        selectionManager.updateSelection(5, 4)
+        selectionManager.endSelection()
+
+        val text = selectionManager.getSelectedText(snapshot, scrollbackPosition = 0)
+        assertEquals("scr-0\nscr-1", text)
+    }
+
     @Test
     fun testClampToDimensions() {
         // Start with a large selection (e.g. 24 rows)
