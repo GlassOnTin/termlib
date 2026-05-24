@@ -273,12 +273,22 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
         // `.../issues/106#issuecomment-1234` land their fragment on the
         // continuation row with no `/` of its own.
         var sawStructural = false
-        var c = curStart
-        while (c < cols && cellChar[curRow][c].isBlobUrlSafe()) {
-            if (cellChar[curRow][c] in "/#?&=") { sawStructural = true; break }
-            c++
+        var runEnd = curStart
+        while (runEnd < cols && cellChar[curRow][runEnd].isBlobUrlSafe()) {
+            if (cellChar[curRow][runEnd] in "/#?&=") sawStructural = true
+            runEnd++
         }
-        if (!sawStructural) return null
+        if (!sawStructural) {
+            // Fallback for slash-less wrap tails: a short URL-safe run alone on
+            // an otherwise-blank line is the shape of a hanging-indent wrap
+            // (e.g. the trailing "t" of a ".git" URL that Claude Code broke
+            // across lines, where the fragment carries no /#?&= of its own).
+            // Indented prose is excluded — it carries more words, so the rest
+            // of the line is not blank.
+            val runLen = runEnd - curStart
+            val restBlank = (runEnd until cols).all { cellChar[curRow][it].isWhitespace() }
+            if (!(restBlank && runLen in 1..(cols / 2))) return null
+        }
 
         return curStart
     }

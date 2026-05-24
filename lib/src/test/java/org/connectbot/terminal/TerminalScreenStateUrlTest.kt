@@ -465,6 +465,53 @@ class TerminalScreenStateUrlTest {
     }
 
     @Test
+    fun `spec_hanging_indent_single_char_tail_joins`() {
+        // The reported iSpindle case: a git URL whose final "t" of ".git"
+        // got wrapped onto the next line behind a hanging indent. The tail
+        // has no /#?&= of its own, but it sits alone on an otherwise-blank
+        // line — the shape of a wrap, not prose.
+        val state = screenState(
+            61,
+            "  To https://github.com/GlassOnTin/iSpindlePlotter.gi",
+            "     t",
+        )
+        assertEquals(
+            "https://github.com/GlassOnTin/iSpindlePlotter.git",
+            state.getHyperlinkUrlAt(row = 0, col = 20),
+        )
+    }
+
+    @Test
+    fun `spec_hanging_indent_multi_char_slashless_tail_joins`() {
+        // Not just single characters: a short slash-less run ("ana") alone on
+        // a mostly-blank line is still a wrap tail.
+        val state = screenState(
+            61,
+            "  See https://github.com/GlassOnTin/Haven/blob/main/READMEban",
+            "     ana",
+        )
+        assertEquals(
+            "https://github.com/GlassOnTin/Haven/blob/main/READMEbanana",
+            state.getHyperlinkUrlAt(row = 0, col = 20),
+        )
+    }
+
+    @Test
+    fun `spec_slashless_word_amid_prose_is_not_a_tail`() {
+        // A slash-less run followed by more words on the same line is prose,
+        // not a wrap tail — must stay rejected (guards the relaxation).
+        val state = screenState(
+            61,
+            "  See https://github.com/GlassOnTin/Haven/tree/main/READMEx",
+            "     ample text here",
+        )
+        assertEquals(
+            "https://github.com/GlassOnTin/Haven/tree/main/READMEx",
+            state.getHyperlinkUrlAt(row = 0, col = 20),
+        )
+    }
+
+    @Test
     fun `spec_tap_before_anchor_returns_null`() {
         // Tap on a row that does not contain a URL anchor and is not a
         // continuation of one. No URL should be returned.
