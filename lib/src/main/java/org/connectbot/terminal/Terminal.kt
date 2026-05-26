@@ -32,6 +32,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.layout.Arrangement
@@ -1382,30 +1383,73 @@ internal fun TerminalWithAccessibility(
                         if (secondPointer != null && forcedSize == null) {
                             longPressJob.cancel()
                             callbackLongPressJob?.cancel()
-                            gestureType = GestureType.Zoom
 
-                            // Pinch-to-zoom: adjust font size directly
+                            // Two fingers: disambiguate pinch-zoom (font size)
+                            // from a two-finger pan. The pan scrolls **Haven's
+                            // own scrollback** (local ring) — deliberately
+                            // distinct from a one-finger swipe, which forwards
+                            // the wheel to the remote/mouse-mode app. Single
+                            // finger = remote side, two fingers = Haven side, so
+                            // you can reach Haven's buffer even while a mouse-mode
+                            // app (tmux/zellij) consumes the one-finger wheel.
+                            // Scale divergence => zoom; parallel vertical motion
+                            // => local scroll; whichever crosses its threshold
+                            // first wins and locks for the rest of the gesture. (#186)
                             val startFontSize = calculatedFontSize.value
                             var cumulativeZoom = 1f
+                            var decideAccumY = 0f
+                            var mode = 0 // 0 = undecided, 1 = zoom, 2 = scroll
+                            val zoomDecide = 0.08f
+                            val panDecidePx = with(density) { 16.dp.toPx() }
 
                             while (true) {
                                 val event = awaitPointerEvent()
                                 if (event.changes.all { !it.pressed }) break
-
                                 if (event.changes.size > 1) {
                                     cumulativeZoom *= event.calculateZoom()
-                                    val newSize = (startFontSize * cumulativeZoom)
-                                        .coerceIn(MIN_PINCH_FONT_SP, MAX_PINCH_FONT_SP)
-                                    calculatedFontSize = newSize.sp
-
+                                    val panY = event.calculatePan().y
+                                    if (mode == 0) {
+                                        decideAccumY += panY
+                                        when {
+                                            kotlin.math.abs(1f - cumulativeZoom) > zoomDecide -> {
+                                                mode = 1
+                                                gestureType = GestureType.Zoom
+                                            }
+                                            kotlin.math.abs(decideAccumY) > panDecidePx -> {
+                                                mode = 2
+                                                gestureType = GestureType.Scroll
+                                            }
+                                        }
+                                    }
+                                    when (mode) {
+                                        1 -> {
+                                            val newSize = (startFontSize * cumulativeZoom)
+                                                .coerceIn(MIN_PINCH_FONT_SP, MAX_PINCH_FONT_SP)
+                                            calculatedFontSize = newSize.sp
+                                        }
+                                        2 -> {
+                                            // Always Haven's local scrollback —
+                                            // never forward to the app. Pixel-smooth,
+                                            // mirroring the one-finger no-callback
+                                            // path. Natural scrolling: fingers down
+                                            // = older content (+panY).
+                                            val newOffset = (scrollOffset.value + panY)
+                                                .coerceIn(0f, maxScroll)
+                                            coroutineScope.launch { scrollOffset.snapTo(newOffset) }
+                                            val scrolledLines = (newOffset / baseCharHeight).toInt()
+                                            screenState.scrollBy(scrolledLines - screenState.scrollbackPosition)
+                                        }
+                                    }
                                     event.changes.forEach { it.consume() }
                                 }
                             }
 
-                            // Persist the new font size; flag prevents the
-                            // LaunchedEffect from resetting before round-trip.
-                            fontSetByPinch = true
-                            onFontSizeChanged?.invoke(calculatedFontSize)
+                            if (mode == 1) {
+                                // Persist the new font size; flag prevents the
+                                // LaunchedEffect from resetting before round-trip.
+                                fontSetByPinch = true
+                                onFontSizeChanged?.invoke(calculatedFontSize)
+                            }
                             lastMultiTouchTime = System.currentTimeMillis()
 
                             return@awaitEachGesture
