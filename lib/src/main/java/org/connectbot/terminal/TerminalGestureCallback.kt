@@ -28,7 +28,12 @@ interface TerminalGestureCallback {
     /** Single tap at terminal cell. Return true to suppress default (hyperlink/focus). */
     fun onTap(col: Int, row: Int): Boolean = false
 
-    /** Long-press at terminal cell. Return true to suppress default (selection start). */
+    /**
+     * Long-press at terminal cell. Return `true` if handled as a discrete action
+     * (e.g. a right-click) — the terminal then ignores the trailing drag. Return
+     * `false` to *arm* a copy-mode selection: a subsequent drag is forwarded via
+     * [onMouseDrag] so the remote runs its own pane-aware selection. (#186)
+     */
     fun onLongPress(col: Int, row: Int): Boolean = false
 
     /** Vertical scroll at terminal cell. Return true to suppress default (scrollback). */
@@ -40,10 +45,13 @@ interface TerminalGestureCallback {
      * [MouseDragPhase.Move] for each cell change, and once at
      * [MouseDragPhase.End] when the press releases.
      *
+     * Reached only after a long-press has armed the gesture (see [onLongPress]);
+     * a drag without a preceding long-press scrolls instead.
+     *
      * Return `true` from [MouseDragPhase.Start] to claim the gesture — the
      * terminal will then route subsequent moves and the end here, and skip
      * its built-in scroll handling. Returning `false` from Start lets the
-     * terminal fall back to scroll-via-wheel-events as before. The return
+     * terminal fall back to scroll-via-wheel-events. The return
      * value is ignored for Move and End — once a drag is claimed it stays
      * claimed for the rest of that gesture.
      *

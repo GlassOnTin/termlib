@@ -130,9 +130,9 @@ private enum class GestureType {
     /**
      * Mouse drag forwarded to the remote (tmux mouse mode). Press/motion/release
      * dispatched via [TerminalGestureCallback.onMouseDrag]. Selected when
-     * a gestureCallback is present, the user starts dragging without a
-     * long-press, and the callback claims the gesture (returns true on
-     * [MouseDragPhase.Start]). (#94)
+     * a gestureCallback is present, a long-press has armed the gesture, the
+     * user then drags, and the callback claims it (returns true on
+     * [MouseDragPhase.Start]). (#94, #186)
      */
     MouseDrag,
 }
@@ -149,18 +149,11 @@ private const val WAIT_FOR_SECOND_TOUCH_MS = 40L
 
 /**
  * Long-press threshold for the gesture callback (ms).
- * When a gestureCallback is present, fires onLongPress at this time.
- * Short enough to feel responsive as a right-click; user must hold past
- * MOUSE_MODE_SELECTION_DELAY_MS for text selection.
+ * When a gestureCallback is present, fires onLongPress at this time — short
+ * enough to feel responsive as a right-click, and the point at which a
+ * copy-mode selection arms so a following drag forwards to the remote. (#186)
  */
 private const val CALLBACK_LONG_PRESS_MS = 400L
-
-/**
- * Long-press delay for text selection when a gesture callback is present (ms).
- * Longer than CALLBACK_LONG_PRESS_MS so the user can distinguish
- * callback action (release before 500ms) from selection (hold past 500ms).
- */
-private const val MOUSE_MODE_SELECTION_DELAY_MS = 500L
 
 /**
  * Millis after last multi-touch event to suppress tap from stale
@@ -1324,12 +1317,20 @@ internal fun TerminalWithAccessibility(
                         }
 
                         // 2. Long press detection
-                        // When gestureCallback is present, fire onLongPress at 400ms
-                        // then wait until 1000ms for selection start.
-                        // When no callback, use the system long-press timeout for selection.
+                        // Mouse mode (gestureCallback present): a long-press at
+                        // CALLBACK_LONG_PRESS_MS fires onLongPress (right-click) and,
+                        // unless that's consumed, *arms* a multiplexer copy-mode
+                        // selection — the subsequent drag forwards press+motion+release
+                        // so the remote (tmux/zellij) selects across its own panes. A
+                        // plain drag with no long-press scrolls the pane instead. (#186)
+                        // No callback (pure terminal): the system long-press timeout
+                        // starts Haven's own local text selection, as before.
                         var longPressDetected = false
                         var gestureEnded = false
                         var callbackLongPressFired = false
+                        // Set when a mouse-mode long-press fires and is *not* consumed
+                        // as a right-click; the next drag becomes a copy-mode selection.
+                        var armMouseDrag = false
 
                         val callbackLongPressJob = if (gestureCallback != null) {
                             launch {
@@ -1340,17 +1341,29 @@ internal fun TerminalWithAccessibility(
                                     val row = (down.position.y / baseCharHeight).toInt()
                                         .coerceIn(0, screenState.snapshot.rows - 1)
                                     callbackLongPressFired = true
-                                    gestureCallback.onLongPress(col, row)
+                                    // Haptic confirms the long-press was recognised, so the
+                                    // user knows a copy-mode selection (or right-click) has
+                                    // armed before they begin dragging. (#186)
+                                    hostView.performHapticFeedback(
+                                        android.view.HapticFeedbackConstants.LONG_PRESS
+                                    )
+                                    // If the callback consumes the press as a discrete
+                                    // action (right-click) leave the drag unarmed; otherwise
+                                    // arm the copy-mode drag.
+                                    val consumed = gestureCallback.onLongPress(col, row)
+                                    armMouseDrag = !consumed
                                 }
                             }
                         } else null
 
                         val longPressJob = launch {
-                            delay(
-                                if (gestureCallback != null) MOUSE_MODE_SELECTION_DELAY_MS
-                                else viewConfiguration.longPressTimeoutMillis
-                            )
-                            if (gestureType == GestureType.Undetermined &&
+                            delay(viewConfiguration.longPressTimeoutMillis)
+                            // Native (Haven-local) text selection is the pure-terminal
+                            // tool only. In mouse mode the multiplexer owns selection via
+                            // copy-mode (long-press-then-drag, armed above), so we never
+                            // start a local selection there. (#186)
+                            if (gestureCallback == null &&
+                                gestureType == GestureType.Undetermined &&
                                 selectionManager.mode == SelectionMode.NONE &&
                                 !gestureEnded
                             ) {
@@ -1367,6 +1380,9 @@ internal fun TerminalWithAccessibility(
                                     col,
                                     screenState.snapshot.cols,
                                     SelectionMode.CHARACTER,
+                                )
+                                hostView.performHapticFeedback(
+                                    android.view.HapticFeedbackConstants.LONG_PRESS
                                 )
                                 showMagnifier = true
                                 magnifierPosition = down.position
@@ -1561,54 +1577,55 @@ internal fun TerminalWithAccessibility(
                             // Determine gesture if still undetermined.
                             // Use total distance from touch-down (not per-frame delta)
                             // so moderate-speed scrolling still triggers classification.
-                            // Skip once long-press or callback has fired — the user is
-                            // holding intentionally and movement should extend selection.
-                            if (gestureType == GestureType.Undetermined &&
-                                !longPressDetected && !callbackLongPressFired
-                            ) {
+                            // Skip once a native selection has started (longPressDetected)
+                            // — the user is holding intentionally and movement extends it.
+                            if (gestureType == GestureType.Undetermined && !longPressDetected) {
                                 val totalDx = change.position.x - down.position.x
                                 val totalDy = change.position.y - down.position.y
                                 if (totalDx * totalDx + totalDy * totalDy > touchSlopSquared) {
-                                    val absDx = kotlin.math.abs(totalDx)
-                                    val absDy = kotlin.math.abs(totalDy)
-                                    if (absDx > absDy) {
-                                        // Horizontal drag — clear stale selection, let pager handle
-                                        isHorizontalDrag = true
+                                    val downCol = (down.position.x / baseCharWidth).toInt()
+                                        .coerceIn(0, screenState.snapshot.cols - 1)
+                                    val downRow = (down.position.y / baseCharHeight).toInt()
+                                        .coerceIn(0, screenState.snapshot.rows - 1)
+                                    if (armMouseDrag) {
+                                        // Long-press-then-drag → forward the drag so the
+                                        // remote (tmux/zellij) runs its own pane-aware
+                                        // copy-mode selection. Falls back to Scroll if the
+                                        // callback declines (e.g. mouse input disabled). (#186)
                                         longPressJob.cancel()
                                         callbackLongPressJob?.cancel()
-                                        if (selectionManager.mode != SelectionMode.NONE) {
-                                            selectionManager.clearSelection()
-                                        }
-                                    } else {
-                                        longPressJob.cancel()
-                                        callbackLongPressJob?.cancel()
-                                        // Mouse-mode drag: offer the gesture to the
-                                        // callback first so the remote (tmux/zellij/...)
-                                        // can own the selection across its own scrollback.
-                                        // The callback decides per-call whether to claim
-                                        // (e.g. gated by a user setting); falling through
-                                        // to Scroll preserves the legacy drag-to-scroll-
-                                        // tmux behaviour.  (#94)
-                                        val downCol = (down.position.x / baseCharWidth).toInt()
-                                            .coerceIn(0, screenState.snapshot.cols - 1)
-                                        val downRow = (down.position.y / baseCharHeight).toInt()
-                                            .coerceIn(0, screenState.snapshot.rows - 1)
                                         val claimed = gestureCallback
                                             ?.onMouseDrag(downCol, downRow, MouseDragPhase.Start)
                                             ?: false
-                                        gestureType = if (claimed) {
-                                            GestureType.MouseDrag
+                                        gestureType = if (claimed) GestureType.MouseDrag else GestureType.Scroll
+                                    } else if (!callbackLongPressFired) {
+                                        // Plain one-finger swipe (no long-press).
+                                        val absDx = kotlin.math.abs(totalDx)
+                                        val absDy = kotlin.math.abs(totalDy)
+                                        if (absDx > absDy) {
+                                            // Horizontal drag — clear stale selection, let pager handle
+                                            isHorizontalDrag = true
+                                            longPressJob.cancel()
+                                            callbackLongPressJob?.cancel()
+                                            if (selectionManager.mode != SelectionMode.NONE) {
+                                                selectionManager.clearSelection()
+                                            }
                                         } else {
-                                            GestureType.Scroll
+                                            // Vertical swipe → Scroll. In mouse mode this
+                                            // forwards the wheel to the app, scrolling the
+                                            // multiplexer pane; with no callback it scrolls
+                                            // Haven's local scrollback. A copy-mode selection
+                                            // now needs an explicit long-press first
+                                            // (armMouseDrag above), so a one-finger swipe is
+                                            // always a scroll and the two no longer fight
+                                            // over the same gesture. (#186)
+                                            longPressJob.cancel()
+                                            callbackLongPressJob?.cancel()
+                                            gestureType = GestureType.Scroll
                                         }
-                                        // Selection is preserved across scroll —
-                                        // the LaunchedEffect on scrollbackPosition
-                                        // shifts both anchors in lockstep so the
-                                        // highlight stays on its logical lines as
-                                        // the viewport moves under the finger.
-                                        // Long-press to start a new selection
-                                        // replaces any existing one.
                                     }
+                                    // else: a right-click long-press already fired and was
+                                    // consumed — ignore the trailing drag.
                                 }
                             }
 
@@ -1832,6 +1849,11 @@ internal fun TerminalWithAccessibility(
                                     // cleared during classification above)
                                 } else if (inPinchCooldown) {
                                     // Suppress accidental taps from pinch finger liftoff
+                                } else if (callbackLongPressFired) {
+                                    // A long-press fired (haptic given) but the finger
+                                    // lifted without dragging — it was a deliberate hold,
+                                    // not a tap. Any right-click was already sent in
+                                    // onLongPress; don't also emit a tap/click. (#186)
                                 } else if (selectionManager.mode != SelectionMode.NONE) {
                                     selectionManager.clearSelection()
                                 } else {
