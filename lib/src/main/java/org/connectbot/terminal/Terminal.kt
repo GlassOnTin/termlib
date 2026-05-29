@@ -113,6 +113,8 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -978,13 +980,20 @@ internal fun TerminalWithAccessibility(
 
     var availableWidth by remember { mutableStateOf(0) }
     var availableHeight by remember { mutableStateOf(0) }
-    // Largest viewport height seen for the current width — i.e. the
-    // keyboard-HIDDEN height. The emulator is sized from this (not from the
-    // live, keyboard-shrunk height), so toggling the soft keyboard no longer
-    // resizes the PTY. That resize was sending a SIGWINCH that made
-    // fancy-prompt shells repaint and shove visible output into scrollback
-    // ("scrolled to the bottom" — issue #206). Reset on a width change
-    // (rotation / split-screen) by the LaunchedEffect below.
+    // The keyboard-HIDDEN viewport height. The emulator is sized from this
+    // (not from the live, keyboard-shrunk height), so toggling the soft
+    // keyboard no longer resizes the PTY. That resize was sending a SIGWINCH
+    // that made fancy-prompt shells repaint and shove visible output into
+    // scrollback ("scrolled to the bottom" — issue #206).
+    //
+    // It is sampled in onSizeChanged ONLY when the IME is actually hidden
+    // (read from the raw window insets), so it can never be seeded from a
+    // keyboard-up measurement. An earlier version tracked the max height seen
+    // and reset on width change, which re-seeded a keyboard-up height after a
+    // tab-switch / return-to-foreground with the keyboard up — making the jump
+    // recur (the #206 follow-up). Sampling only-when-hidden fixes that at the
+    // root and also handles rotation (the new orientation's hidden height is
+    // sampled the moment the keyboard is down).
     var maxAvailableHeight by remember { mutableStateOf(0) }
 
     Box(
@@ -993,7 +1002,22 @@ internal fun TerminalWithAccessibility(
             .onSizeChanged {
                 availableWidth = it.width
                 availableHeight = it.height
-                if (it.height > maxAvailableHeight) maxAvailableHeight = it.height
+                // Sample the keyboard-HIDDEN baseline only when the IME is
+                // actually hidden — read from the raw window insets, which
+                // bypass the upstream consumeWindowInsets that zeroes the
+                // Compose-side ime inset here. This stops the baseline ever
+                // being seeded from a keyboard-up height (the #206 recurrence).
+                // When opened straight into a keyboard-up state with no hidden
+                // height seen yet, estimate it by adding the IME inset back so
+                // the grid still gets a sane initial size (corrected exactly on
+                // the first keyboard-down).
+                val imeBottom = ViewCompat.getRootWindowInsets(hostView)
+                    ?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0
+                if (imeBottom == 0) {
+                    maxAvailableHeight = it.height
+                } else if (maxAvailableHeight == 0) {
+                    maxAvailableHeight = it.height + imeBottom
+                }
             }
             .then(
                 if (keyboardEnabled) {
@@ -1065,10 +1089,6 @@ internal fun TerminalWithAccessibility(
         // Track whether we've sized the emulator once so subsequent resizes
         // can debounce without delaying the initial paint.
         var initialResizeDone by remember(terminalEmulator) { mutableStateOf(false) }
-
-        // Reset the keyboard-hidden height baseline on a width change
-        // (rotation / split-screen) so the new configuration re-measures.
-        LaunchedEffect(availableWidth) { maxAvailableHeight = availableHeight }
 
         // Resize terminal when dimensions change. Rows come from
         // maxAvailableHeight (the keyboard-hidden height), so a soft-keyboard
