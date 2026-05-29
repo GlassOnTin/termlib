@@ -1386,53 +1386,35 @@ internal fun TerminalWithAccessibility(
                         }
 
                         // 2. Long press detection
-                        // Mouse mode (gestureCallback present): a long-press at
-                        // CALLBACK_LONG_PRESS_MS fires onLongPress (right-click) and,
-                        // unless that's consumed, *arms* a multiplexer copy-mode
-                        // selection — the subsequent drag forwards press+motion+release
-                        // so the remote (tmux/zellij) selects across its own panes. A
-                        // plain drag with no long-press scrolls the pane instead. (#186)
-                        // No callback (pure terminal): the system long-press timeout
-                        // starts Haven's own local text selection, as before.
+                        // Long-press always starts a Haven-local selection so the
+                        // visible Copy/menu workflow works in every session,
+                        // including tmux/zellij mouse-mode tabs. The previous
+                        // callback-driven path (CALLBACK_LONG_PRESS_MS → onLongPress
+                        // right-click and "long-press-then-drag = multiplexer
+                        // copy-mode", #186) is retired — tmux's own copy-mode is
+                        // still reachable via its Ctrl-B [ keybinding.
                         var longPressDetected = false
                         var gestureEnded = false
-                        var callbackLongPressFired = false
-                        // Set when a mouse-mode long-press fires and is *not* consumed
-                        // as a right-click; the next drag becomes a copy-mode selection.
-                        var armMouseDrag = false
-
-                        val callbackLongPressJob = if (gestureCallback != null) {
-                            launch {
-                                delay(CALLBACK_LONG_PRESS_MS)
-                                if (gestureType == GestureType.Undetermined && !gestureEnded) {
-                                    val col = (down.position.x / baseCharWidth).toInt()
-                                        .coerceIn(0, screenState.snapshot.cols - 1)
-                                    val row = ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
-                                        .coerceIn(0, screenState.snapshot.rows - 1)
-                                    callbackLongPressFired = true
-                                    // Haptic confirms the long-press was recognised, so the
-                                    // user knows a copy-mode selection (or right-click) has
-                                    // armed before they begin dragging. (#186)
-                                    hostView.performHapticFeedback(
-                                        android.view.HapticFeedbackConstants.LONG_PRESS
-                                    )
-                                    // If the callback consumes the press as a discrete
-                                    // action (right-click) leave the drag unarmed; otherwise
-                                    // arm the copy-mode drag.
-                                    val consumed = gestureCallback.onLongPress(col, row)
-                                    armMouseDrag = !consumed
-                                }
-                            }
-                        } else null
+                        // Kept (always false) so the existing drag-detection branches
+                        // (`if (armMouseDrag)` / `!callbackLongPressFired`) compile
+                        // without surgery and fall through to the plain-swipe path.
+                        val callbackLongPressFired = false
+                        val armMouseDrag = false
+                        val callbackLongPressJob: kotlinx.coroutines.Job? = null
 
                         val longPressJob = launch {
                             delay(viewConfiguration.longPressTimeoutMillis)
-                            // Native (Haven-local) text selection is the pure-terminal
-                            // tool only. In mouse mode the multiplexer owns selection via
-                            // copy-mode (long-press-then-drag, armed above), so we never
-                            // start a local selection there. (#186)
-                            if (gestureCallback == null &&
-                                gestureType == GestureType.Undetermined &&
+                            // Haven-local text selection on long-press. Previously
+                            // gated to pure-terminal mode (no gestureCallback) so
+                            // the multiplexer could own mouse-mode selection via
+                            // long-press-then-drag (#186), but that left tmux/zellij
+                            // users with no usable "select text and tap Copy"
+                            // workflow — they had to drop into copy-mode via
+                            // Ctrl-B [ and lose the visible-on-screen Copy button.
+                            // Restored: long-press always starts a Haven local
+                            // selection; tmux's own copy-mode remains reachable
+                            // via its keybinding.
+                            if (gestureType == GestureType.Undetermined &&
                                 selectionManager.mode == SelectionMode.NONE &&
                                 !gestureEnded
                             ) {
