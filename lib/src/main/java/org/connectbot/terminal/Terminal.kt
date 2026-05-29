@@ -977,6 +977,14 @@ internal fun TerminalWithAccessibility(
 
     var availableWidth by remember { mutableStateOf(0) }
     var availableHeight by remember { mutableStateOf(0) }
+    // Largest viewport height seen for the current width — i.e. the
+    // keyboard-HIDDEN height. The emulator is sized from this (not from the
+    // live, keyboard-shrunk height), so toggling the soft keyboard no longer
+    // resizes the PTY. That resize was sending a SIGWINCH that made
+    // fancy-prompt shells repaint and shove visible output into scrollback
+    // ("scrolled to the bottom" — issue #206). Reset on a width change
+    // (rotation / split-screen) by the LaunchedEffect below.
+    var maxAvailableHeight by remember { mutableStateOf(0) }
 
     Box(
         modifier = modifier
@@ -984,6 +992,7 @@ internal fun TerminalWithAccessibility(
             .onSizeChanged {
                 availableWidth = it.width
                 availableHeight = it.height
+                if (it.height > maxAvailableHeight) maxAvailableHeight = it.height
             }
             .then(
                 if (keyboardEnabled) {
@@ -1056,9 +1065,16 @@ internal fun TerminalWithAccessibility(
         // can debounce without delaying the initial paint.
         var initialResizeDone by remember(terminalEmulator) { mutableStateOf(false) }
 
-        // Resize terminal when dimensions change
-        LaunchedEffect(terminalEmulator, availableWidth, availableHeight, forcedSize, baseCharWidth, baseCharHeight) {
-            if (availableWidth == 0 || availableHeight == 0 || baseCharWidth <= 0f || baseCharHeight <= 0f) {
+        // Reset the keyboard-hidden height baseline on a width change
+        // (rotation / split-screen) so the new configuration re-measures.
+        LaunchedEffect(availableWidth) { maxAvailableHeight = availableHeight }
+
+        // Resize terminal when dimensions change. Rows come from
+        // maxAvailableHeight (the keyboard-hidden height), so a soft-keyboard
+        // toggle leaves the row count unchanged and never resizes the PTY
+        // (issue #206); only a genuine width/rotation change does.
+        LaunchedEffect(terminalEmulator, availableWidth, maxAvailableHeight, forcedSize, baseCharWidth, baseCharHeight) {
+            if (availableWidth == 0 || maxAvailableHeight == 0 || baseCharWidth <= 0f || baseCharHeight <= 0f) {
                 return@LaunchedEffect
             }
 
@@ -1066,7 +1082,7 @@ internal fun TerminalWithAccessibility(
             val newCols =
                 forcedSize?.second ?: charsPerDimension(availableWidth, baseCharWidth)
             val newRows =
-                forcedSize?.first ?: charsPerDimension(availableHeight, baseCharHeight)
+                forcedSize?.first ?: charsPerDimension(maxAvailableHeight, baseCharHeight)
 
             val dimensions = terminalEmulator.dimensions
             if (newRows == dimensions.rows && newCols == dimensions.columns) {
@@ -1094,11 +1110,12 @@ internal fun TerminalWithAccessibility(
             }
         }
 
-        // Use base dimensions for terminal sizing (not zoomed dimensions)
+        // Use base dimensions for terminal sizing (not zoomed dimensions).
+        // Rows from maxAvailableHeight so the grid height is keyboard-independent.
         val newCols =
             forcedSize?.second ?: charsPerDimension(availableWidth, baseCharWidth)
         val newRows =
-            forcedSize?.first ?: charsPerDimension(availableHeight, baseCharHeight)
+            forcedSize?.first ?: charsPerDimension(maxAvailableHeight, baseCharHeight)
 
         // Auto-scroll to bottom when new content arrives (if not manually scrolled).
         //
@@ -1163,6 +1180,36 @@ internal fun TerminalWithAccessibility(
         val terminalWidthPx = newCols * baseCharWidth
         val terminalHeightPx = newRows * baseCharHeight
 
+        // Live visible viewport height (shrinks while the keyboard is up).
+        // Used for edge-scroll zone detection, which works in viewport space.
+        // rememberUpdatedState so the long-lived gesture lambda sees it live.
+        val visibleViewportPx by rememberUpdatedState(availableHeight.toFloat())
+
+        // How far (px) to shift the rendered grid up so the cursor stays
+        // visible while the soft keyboard is up. The emulator is sized for the
+        // keyboard-hidden height (maxAvailableHeight), so when the keyboard
+        // shrinks the viewport the grid is taller than what's visible. Rather
+        // than resize the PTY (which made fancy-prompt shells repaint and jump
+        // to the bottom — issue #206), shift the render up by this much. Scroll
+        // just enough to keep the cursor row at the bottom edge, capped at the
+        // covered height: a bottom-anchored shell prompt then sits right above
+        // the keyboard, while a full-screen TUI with a higher cursor isn't
+        // scrolled off the top. The render translate uses this and touch
+        // hit-testing adds it back; 0 when the keyboard is hidden.
+        // rememberUpdatedState so the gesture lambda reads the live value.
+        val keyboardCoveredPx by rememberUpdatedState(
+            run {
+                val covered = (maxAvailableHeight - availableHeight).coerceAtLeast(0).toFloat()
+                when {
+                    covered <= 0f -> 0f
+                    // Scrolled into history: just show the bottom of the window.
+                    screenState.scrollbackPosition != 0 -> covered
+                    else -> (((screenState.snapshot.cursorRow + 1) * baseCharHeight) - availableHeight)
+                        .coerceIn(0f, covered)
+                }
+            },
+        )
+
         // Draw terminal content with context menu overlay
         Box(
             modifier = (if (forcedSize != null) {
@@ -1203,6 +1250,7 @@ internal fun TerminalWithAccessibility(
                                     range,
                                     baseCharWidth,
                                     baseCharHeight,
+                                    keyboardCoveredPx = keyboardCoveredPx,
                                 )
                                 if (touchingStart || touchingEnd) {
                                     gestureType = GestureType.HandleDrag
@@ -1225,7 +1273,7 @@ internal fun TerminalWithAccessibility(
                                             (pos.x / baseCharWidth).toInt()
                                                 .coerceIn(0, screenState.snapshot.cols - 1)
                                         val newRow =
-                                            (pos.y / baseCharHeight).toInt()
+                                            ((pos.y + keyboardCoveredPx) / baseCharHeight).toInt()
                                                 .coerceIn(0, screenState.snapshot.rows - 1)
 
                                         val current = selectionManager.selectionRange
@@ -1264,7 +1312,7 @@ internal fun TerminalWithAccessibility(
                                             delay(EDGE_SCROLL_TICK_MS)
                                             if (selectionManager.selectionRange == null) continue
                                             val viewportH =
-                                                screenState.snapshot.rows * baseCharHeight
+                                                visibleViewportPx
                                             val dir = edgeScrollDirection(
                                                 handleDragPosition.y, viewportH,
                                                 screenState.scrollbackPosition,
@@ -1338,7 +1386,7 @@ internal fun TerminalWithAccessibility(
                                 if (gestureType == GestureType.Undetermined && !gestureEnded) {
                                     val col = (down.position.x / baseCharWidth).toInt()
                                         .coerceIn(0, screenState.snapshot.cols - 1)
-                                    val row = (down.position.y / baseCharHeight).toInt()
+                                    val row = ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
                                         .coerceIn(0, screenState.snapshot.rows - 1)
                                     callbackLongPressFired = true
                                     // Haptic confirms the long-press was recognised, so the
@@ -1373,7 +1421,7 @@ internal fun TerminalWithAccessibility(
                                 // Start selection
                                 val col = (down.position.x / baseCharWidth).toInt()
                                     .coerceIn(0, screenState.snapshot.cols - 1)
-                                val row = (down.position.y / baseCharHeight).toInt()
+                                val row = ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
                                     .coerceIn(0, screenState.snapshot.rows - 1)
                                 selectionManager.startSelection(
                                     row,
@@ -1504,11 +1552,11 @@ internal fun TerminalWithAccessibility(
                                 ) {
                                     continue
                                 }
-                                val viewportH = screenState.snapshot.rows * baseCharHeight
+                                val viewportH = visibleViewportPx
                                 if (viewportH <= 0f) continue
                                 val dragCol = (lastDragPosition.x / baseCharWidth).toInt()
                                     .coerceIn(0, screenState.snapshot.cols - 1)
-                                val dragRow = (lastDragPosition.y / baseCharHeight).toInt()
+                                val dragRow = ((lastDragPosition.y + keyboardCoveredPx) / baseCharHeight).toInt()
                                     .coerceIn(0, screenState.snapshot.rows - 1)
                                 when (gestureType) {
                                     GestureType.Selection -> {
@@ -1585,7 +1633,7 @@ internal fun TerminalWithAccessibility(
                                 if (totalDx * totalDx + totalDy * totalDy > touchSlopSquared) {
                                     val downCol = (down.position.x / baseCharWidth).toInt()
                                         .coerceIn(0, screenState.snapshot.cols - 1)
-                                    val downRow = (down.position.y / baseCharHeight).toInt()
+                                    val downRow = ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
                                         .coerceIn(0, screenState.snapshot.rows - 1)
                                     if (armMouseDrag) {
                                         // Long-press-then-drag → forward the drag so the
@@ -1637,7 +1685,7 @@ internal fun TerminalWithAccessibility(
                                             (change.position.x / baseCharWidth).toInt()
                                                 .coerceIn(0, screenState.snapshot.cols - 1)
                                         val dragRow =
-                                            (change.position.y / baseCharHeight).toInt()
+                                            ((change.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
                                                 .coerceIn(0, screenState.snapshot.rows - 1)
 
                                         // Edge-zone extension. Two paths:
@@ -1652,7 +1700,7 @@ internal fun TerminalWithAccessibility(
                                         //     lets a drag-select extend off the top of
                                         //     the viewport into scrollback (#94).
                                         val relY = change.position.y /
-                                            (screenState.snapshot.rows * baseCharHeight)
+                                            (visibleViewportPx)
                                         val nearTop = relY < EDGE_SCROLL_ZONE
                                         val nearBottom = relY > 1f - EDGE_SCROLL_ZONE
                                         val callbackHandled = if ((nearTop || nearBottom) && gestureCallback != null) {
@@ -1694,7 +1742,7 @@ internal fun TerminalWithAccessibility(
                                     // wire and make tmux's selection-extension stutter.
                                     val dragCol = (change.position.x / baseCharWidth).toInt()
                                         .coerceIn(0, screenState.snapshot.cols - 1)
-                                    val dragRow = (change.position.y / baseCharHeight).toInt()
+                                    val dragRow = ((change.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
                                         .coerceIn(0, screenState.snapshot.rows - 1)
                                     if (dragCol != lastMouseDragCol || dragRow != lastMouseDragRow) {
                                         gestureCallback?.onMouseDrag(dragCol, dragRow, MouseDragPhase.Move)
@@ -1707,7 +1755,7 @@ internal fun TerminalWithAccessibility(
                                     // the top/bottom of the viewport.
                                     if (gestureCallback != null) {
                                         val relY = change.position.y /
-                                            (screenState.snapshot.rows * baseCharHeight)
+                                            (visibleViewportPx)
                                         if (relY < EDGE_SCROLL_ZONE || relY > 1f - EDGE_SCROLL_ZONE) {
                                             val scrollUp = relY < EDGE_SCROLL_ZONE
                                             gestureCallback.onScroll(dragCol, dragRow, scrollUp)
@@ -1727,7 +1775,7 @@ internal fun TerminalWithAccessibility(
                                             val scrollUp = !draggedUp
                                             val col = (change.position.x / baseCharWidth).toInt()
                                                 .coerceIn(0, screenState.snapshot.cols - 1)
-                                            val row = (change.position.y / baseCharHeight).toInt()
+                                            val row = ((change.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
                                                 .coerceIn(0, screenState.snapshot.rows - 1)
                                             val consumed = gestureCallback.onScroll(col, row, scrollUp)
                                             if (!consumed) {
@@ -1779,7 +1827,7 @@ internal fun TerminalWithAccessibility(
                                     val scrollUp = accumulatedScrollY > 0  // natural: positive drag = scroll up
                                     val col = (down.position.x / baseCharWidth).toInt()
                                         .coerceIn(0, screenState.snapshot.cols - 1)
-                                    val row = (down.position.y / baseCharHeight).toInt()
+                                    val row = ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
                                         .coerceIn(0, screenState.snapshot.rows - 1)
                                     val consumed = gestureCallback.onScroll(col, row, scrollUp)
                                     if (!consumed) {
@@ -1837,7 +1885,7 @@ internal fun TerminalWithAccessibility(
                                     else (down.position.x / baseCharWidth).toInt()
                                         .coerceIn(0, screenState.snapshot.cols - 1)
                                 val endRow = if (lastMouseDragRow >= 0) lastMouseDragRow
-                                    else (down.position.y / baseCharHeight).toInt()
+                                    else ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
                                         .coerceIn(0, screenState.snapshot.rows - 1)
                                 gestureCallback?.onMouseDrag(endCol, endRow, MouseDragPhase.End)
                             }
@@ -1859,7 +1907,7 @@ internal fun TerminalWithAccessibility(
                                 } else {
                                     val tapCol = (down.position.x / baseCharWidth).toInt()
                                         .coerceIn(0, screenState.snapshot.cols - 1)
-                                    val tapRow = (down.position.y / baseCharHeight).toInt()
+                                    val tapRow = ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
                                         .coerceIn(0, screenState.snapshot.rows - 1)
 
                                     // Check hyperlinks first — they take priority over
@@ -1962,6 +2010,14 @@ internal fun TerminalWithAccessibility(
                     }
                 }
 
+                // Shift all drawn content up by the height the soft keyboard
+                // covers so the cursor row (bottom of the keyboard-independent
+                // grid) stays visible just above the keyboard. The background
+                // fill above is intentionally NOT translated — it must cover
+                // the whole viewport. Touch hit-testing adds the same offset
+                // back (see keyboardCoveredPx). 0 when the keyboard is hidden,
+                // so this is a no-op then. (#206)
+                translate(top = -keyboardCoveredPx) {
                 // Draw each line
                 for (row in 0 until screenState.snapshot.rows) {
                     val line = screenState.getVisibleLine(row)
@@ -2066,6 +2122,7 @@ internal fun TerminalWithAccessibility(
                         )
                     }
                 }
+                } // end translate(top = -keyboardCoveredPx)
             }
 
             if (accessibilityEnabled) {
@@ -2094,6 +2151,7 @@ internal fun TerminalWithAccessibility(
         if (showMagnifier) {
             MagnifyingGlass(
                 position = magnifierPosition,
+                keyboardCoveredPx = keyboardCoveredPx,
                 screenState = screenState,
                 baseCharWidth = baseCharWidth,
                 baseCharHeight = baseCharHeight,
@@ -2618,6 +2676,7 @@ private fun isTouchingHandle(
     charWidth: Float,
     charHeight: Float,
     hitRadius: Float = HANDLE_HIT_RADIUS,
+    keyboardCoveredPx: Float = 0f,
 ): Pair<Boolean, Boolean> {
     // Handle circles are drawn offset from the character edge by their radius (~12dp).
     // Start handle points up (circle above the character top),
@@ -2633,8 +2692,11 @@ private fun isTouchingHandle(
         range.endRow * charHeight + charHeight + handleRadius,
     )
 
-    val distToStart = (touchPos - startPos).getDistance()
-    val distToEnd = (touchPos - endPos).getDistance()
+    // touchPos is in viewport coords; handles are drawn shifted up by
+    // keyboardCoveredPx (the #206 translate), so compare in content space.
+    val contentTouch = Offset(touchPos.x, touchPos.y + keyboardCoveredPx)
+    val distToStart = (contentTouch - startPos).getDistance()
+    val distToEnd = (contentTouch - endPos).getDistance()
 
     return Pair(
         distToStart < hitRadius,
@@ -2717,6 +2779,7 @@ internal fun magnifierOffset(
 @Composable
 private fun MagnifyingGlass(
     position: Offset,
+    keyboardCoveredPx: Float = 0f,
     screenState: TerminalScreenState,
     baseCharWidth: Float,
     baseCharHeight: Float,
@@ -2753,7 +2816,10 @@ private fun MagnifyingGlass(
     // pivot, so the offset is simply position minus half the magnifier.
     val centerOffset = Offset(
         x = position.x - magnifierSizePx / 2f,
-        y = position.y - magnifierSizePx / 2f,
+        // The finger's content-y is position.y + keyboardCoveredPx (the main
+        // canvas draws shifted up by that for #206), so centre the loupe on
+        // the content actually under the finger.
+        y = position.y + keyboardCoveredPx - magnifierSizePx / 2f,
     )
 
     Box(
@@ -2785,7 +2851,7 @@ private fun MagnifyingGlass(
             translate(-centerOffset.x * magnifierScale, -centerOffset.y * magnifierScale) {
                 scale(magnifierScale, magnifierScale) {
                     // Calculate which rows to draw
-                    val centerRow = (position.y / baseCharHeight).toInt().coerceIn(0, screenState.snapshot.rows - 1)
+                    val centerRow = ((position.y + keyboardCoveredPx) / baseCharHeight).toInt().coerceIn(0, screenState.snapshot.rows - 1)
 
                     // Draw a few rows around the touch point
                     for (rowOffset in -MAGNIFIER_ROW_RANGE..MAGNIFIER_ROW_RANGE) {
