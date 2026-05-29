@@ -2204,7 +2204,14 @@ internal fun TerminalWithAccessibility(
                 val buttonX = (endPosition.second * baseCharWidth)
                     .coerceAtMost(availableWidth - buttonRowWidthPx)
                     .coerceAtLeast(0f)
-                val buttonY = endPosition.first * baseCharHeight - with(density) { COPY_BUTTON_OFFSET.toPx() }
+                // Button is laid out in the parent Box (viewport coords), but the
+                // selection itself is rendered shifted up by keyboardCoveredPx
+                // inside the Canvas (#206). Apply the same shift so the button
+                // sits above the visible selection-end row, not below the
+                // keyboard.
+                val buttonY = endPosition.first * baseCharHeight -
+                    keyboardCoveredPx -
+                    with(density) { COPY_BUTTON_OFFSET.toPx() }
                 val context = LocalContext.current
                 var overflowMenuExpanded by remember { mutableStateOf(false) }
 
