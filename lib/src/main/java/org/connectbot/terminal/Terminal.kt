@@ -61,6 +61,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
@@ -1974,6 +1975,12 @@ internal fun TerminalWithAccessibility(
             Canvas(
                 modifier = Modifier
                     .fillMaxSize()
+                    // Clip to the visible viewport. The row loop is drawn inside
+                    // translate(top = -keyboardCoveredPx) (#206); without a clip
+                    // a Canvas paints outside its bounds, so the scrolled-up top
+                    // rows bled over the status bar. Clipping keeps them inside
+                    // the terminal box. No-op when keyboardCoveredPx == 0.
+                    .clipToBounds()
                     .clearAndSetSemantics {
                         // Hide Canvas from accessibility tree - AccessibilityOverlay provides semantic structure
                     },
