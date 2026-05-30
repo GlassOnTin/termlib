@@ -48,6 +48,7 @@ internal enum class CursorShape {
  * @property terminalTitle The terminal window title (set by escape sequences)
  * @property rows Number of rows in the visible terminal
  * @property cols Number of columns in the visible terminal
+ * @property altScreen Whether the alternate screen buffer is active (full-screen TUIs)
  * @property timestamp Timestamp when this snapshot was created (System.currentTimeMillis())
  * @property sequenceNumber Monotonically increasing sequence number for ordering snapshots
  */
@@ -62,6 +63,7 @@ internal data class TerminalSnapshot(
     val terminalTitle: String,
     val rows: Int,
     val cols: Int,
+    val altScreen: Boolean = false,
     val timestamp: Long,
     val sequenceNumber: Long,
 ) {
@@ -87,6 +89,7 @@ internal data class TerminalSnapshot(
             terminalTitle = "",
             rows = rows,
             cols = cols,
+            altScreen = false,
             timestamp = System.currentTimeMillis(),
             sequenceNumber = 0L,
         )

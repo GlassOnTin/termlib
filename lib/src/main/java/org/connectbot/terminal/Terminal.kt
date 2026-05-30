@@ -1090,12 +1090,21 @@ internal fun TerminalWithAccessibility(
         // can debounce without delaying the initial paint.
         var initialResizeDone by remember(terminalEmulator) { mutableStateOf(false) }
 
-        // Resize terminal when dimensions change. Rows come from
-        // maxAvailableHeight (the keyboard-hidden height), so a soft-keyboard
-        // toggle leaves the row count unchanged and never resizes the PTY
-        // (issue #206); only a genuine width/rotation change does.
-        LaunchedEffect(terminalEmulator, availableWidth, maxAvailableHeight, forcedSize, baseCharWidth, baseCharHeight) {
-            if (availableWidth == 0 || maxAvailableHeight == 0 || baseCharWidth <= 0f || baseCharHeight <= 0f) {
+        // Height the PTY is sized from. On the PRIMARY buffer (shells) this is
+        // the keyboard-hidden height, so a soft-keyboard toggle leaves the row
+        // count unchanged and never resizes the PTY (issue #206) — instead the
+        // render is shifted up (keyboardCoveredPx). On the ALTERNATE buffer
+        // (full-screen TUIs: tmux/vim/less) we size to the live, keyboard-
+        // shrunk height so the app reflows to fit above the keyboard (its
+        // status line stays reachable). Alt-screen apps have no scrollback and
+        // expect SIGWINCH reflow, so this doesn't reintroduce the #206 symptom.
+        val sizingHeight = if (screenState.snapshot.altScreen) availableHeight else maxAvailableHeight
+
+        // Resize terminal when the sizing dimensions change. On the primary
+        // buffer a soft-keyboard toggle leaves the row count unchanged (#206);
+        // on the alternate buffer it follows the visible height.
+        LaunchedEffect(terminalEmulator, availableWidth, sizingHeight, forcedSize, baseCharWidth, baseCharHeight) {
+            if (availableWidth == 0 || sizingHeight == 0 || baseCharWidth <= 0f || baseCharHeight <= 0f) {
                 return@LaunchedEffect
             }
 
@@ -1103,7 +1112,7 @@ internal fun TerminalWithAccessibility(
             val newCols =
                 forcedSize?.second ?: charsPerDimension(availableWidth, baseCharWidth)
             val newRows =
-                forcedSize?.first ?: charsPerDimension(maxAvailableHeight, baseCharHeight)
+                forcedSize?.first ?: charsPerDimension(sizingHeight, baseCharHeight)
 
             val dimensions = terminalEmulator.dimensions
             if (newRows == dimensions.rows && newCols == dimensions.columns) {
@@ -1132,11 +1141,12 @@ internal fun TerminalWithAccessibility(
         }
 
         // Use base dimensions for terminal sizing (not zoomed dimensions).
-        // Rows from maxAvailableHeight so the grid height is keyboard-independent.
+        // Rows from sizingHeight: keyboard-independent on the primary buffer,
+        // visible-height-following on the alternate buffer (see above).
         val newCols =
             forcedSize?.second ?: charsPerDimension(availableWidth, baseCharWidth)
         val newRows =
-            forcedSize?.first ?: charsPerDimension(maxAvailableHeight, baseCharHeight)
+            forcedSize?.first ?: charsPerDimension(sizingHeight, baseCharHeight)
 
         // Auto-scroll to bottom when new content arrives (if not manually scrolled).
         //
@@ -1223,6 +1233,10 @@ internal fun TerminalWithAccessibility(
                 val covered = (maxAvailableHeight - availableHeight).coerceAtLeast(0).toFloat()
                 when {
                     covered <= 0f -> 0f
+                    // Alternate buffer (TUI): the PTY is sized to the live
+                    // visible height, so the grid already fits above the
+                    // keyboard — nothing to shift.
+                    screenState.snapshot.altScreen -> 0f
                     // Scrolled into history: just show the bottom of the window.
                     screenState.scrollbackPosition != 0 -> covered
                     else -> (((screenState.snapshot.cursorRow + 1) * baseCharHeight) - availableHeight)

@@ -367,6 +367,13 @@ internal class TerminalEmulatorImpl(
     private var cursorShape = CursorShape.BLOCK
     private var cursorBlink = false
 
+    // True while the alternate screen buffer is active (DECSET 1049 — set by
+    // full-screen TUIs like tmux/vim/less). Surfaced on the snapshot so the
+    // Compose layer can size the PTY to the live keyboard-shrunk viewport for
+    // these apps (they reflow on SIGWINCH and have no scrollback), while the
+    // primary buffer keeps the keyboard-independent #206 sizing.
+    private var altScreenActive = false
+
     // Terminal properties
     private var terminalTitle = ""
 
@@ -667,6 +674,12 @@ internal class TerminalEmulatorImpl(
                         // it — alt-screen activation always paints a
                         // fresh buffer.
                         3 -> {
+                            // Record the alt-screen state so the snapshot
+                            // reflects it (the Compose layer sizes the PTY
+                            // per-buffer). propertyChanged ensures a snapshot
+                            // is emitted on the ON transition too.
+                            altScreenActive = value.value
+                            propertyChanged = true
                             if (!value.value) {
                                 pendingDamageRegions.clear()
                                 pendingDamageRegions.add(DamageRegion(0, rows, 0, cols))
@@ -1168,6 +1181,7 @@ internal class TerminalEmulatorImpl(
             terminalTitle = terminalTitle,
             rows = rows,
             cols = cols,
+            altScreen = altScreenActive,
             timestamp = System.currentTimeMillis(),
             sequenceNumber = sequenceNumber++,
         )
