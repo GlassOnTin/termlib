@@ -1231,17 +1231,29 @@ internal fun TerminalWithAccessibility(
         val keyboardCoveredPx by rememberUpdatedState(
             run {
                 val covered = (maxAvailableHeight - availableHeight).coerceAtLeast(0).toFloat()
-                when {
-                    covered <= 0f -> 0f
-                    // Alternate buffer (TUI): the PTY is sized to the live
-                    // visible height, so the grid already fits above the
-                    // keyboard — nothing to shift.
-                    screenState.snapshot.altScreen -> 0f
-                    // Scrolled into history: just show the bottom of the window.
-                    screenState.scrollbackPosition != 0 -> covered
-                    else -> (((screenState.snapshot.cursorRow + 1) * baseCharHeight) - availableHeight)
-                        .coerceIn(0f, covered)
-                }
+                // Bottom-most non-blank row — what the user expects pinned above
+                // the keyboard. Scanned only when a shift might apply (keyboard
+                // up, primary buffer, at the live bottom); 0 otherwise so the
+                // common keyboard-down path skips the row sweep entirely.
+                val lastContentRow =
+                    if (covered <= 0f || screenState.snapshot.altScreen ||
+                        screenState.scrollbackPosition != 0
+                    ) {
+                        screenState.snapshot.cursorRow
+                    } else {
+                        (screenState.snapshot.rows - 1 downTo 0)
+                            .firstOrNull { screenState.getVisibleLine(it).text.isNotBlank() }
+                            ?: screenState.snapshot.cursorRow
+                    }
+                keyboardCoveredShiftPx(
+                    covered = covered,
+                    altScreen = screenState.snapshot.altScreen,
+                    scrollbackPosition = screenState.scrollbackPosition,
+                    cursorRow = screenState.snapshot.cursorRow,
+                    lastContentRow = lastContentRow,
+                    charHeight = baseCharHeight,
+                    availableHeight = availableHeight,
+                )
             },
         )
 
@@ -2623,6 +2635,46 @@ internal fun edgeScrollRowsPerTick(
     }
     // Linear ramp from 1 row/tick at zone boundary to maxRows at screen edge.
     return 1 + (depth * (maxRows - 1)).toInt().coerceIn(0, maxRows - 1)
+}
+
+/**
+ * Vertical distance (px) to translate the rendered grid UP so the bottom-most
+ * content stays visible just above the soft keyboard, on the PRIMARY buffer
+ * (issue #206 and the tmux/Claude-Code status-line follow-up).
+ *
+ * Returns 0 when the keyboard is hidden ([covered] <= 0) or on the alternate
+ * buffer ([altScreen] — the PTY is reflowed to the live height there, so the
+ * grid already fits). When scrolled into history ([scrollbackPosition] != 0)
+ * it shows the bottom of the window ([covered]).
+ *
+ * Otherwise it anchors on whichever row is LOWER on screen — the cursor (so a
+ * bottom-anchored shell prompt stays put) or [lastContentRow] (so a
+ * full-screen TUI living on the primary buffer, e.g. a REPL inside tmux that
+ * keeps scrollback and never enters the alternate screen, doesn't hide its
+ * status/prompt rows behind the keyboard). The shift is capped at [covered]
+ * and never exceeds `cursorRow * charHeight`, so the cursor's own row is never
+ * scrolled off the top of the viewport.
+ *
+ * @param covered Pixels the keyboard currently covers (maxHeight - liveHeight).
+ * @param availableHeight Live (keyboard-shrunk) viewport height in px.
+ */
+internal fun keyboardCoveredShiftPx(
+    covered: Float,
+    altScreen: Boolean,
+    scrollbackPosition: Int,
+    cursorRow: Int,
+    lastContentRow: Int,
+    charHeight: Float,
+    availableHeight: Int,
+): Float = when {
+    covered <= 0f -> 0f
+    altScreen -> 0f
+    scrollbackPosition != 0 -> covered
+    else -> {
+        val anchorRow = maxOf(cursorRow, lastContentRow)
+        val desired = ((anchorRow + 1) * charHeight) - availableHeight
+        desired.coerceIn(0f, minOf(covered, cursorRow * charHeight))
+    }
 }
 
 /**
