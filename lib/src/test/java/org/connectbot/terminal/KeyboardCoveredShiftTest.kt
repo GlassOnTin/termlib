@@ -129,4 +129,30 @@ class KeyboardCoveredShiftTest {
         // negative, coerced to 0 — the cursor is already visible.
         assertEquals(0f, shift(covered = 100f, cursorRow = 10, lastContentRow = 10), 0f)
     }
+
+    // shouldReflowToKeyboard: which sessions resize (reflow) vs render-shift on
+    // a keyboard toggle. The reflow path skips the shift above entirely.
+
+    @Test
+    fun reflow_altScreenAlwaysReflows() {
+        // vim/less/htop and tmux-on-alt: the alt buffer reflows regardless of
+        // the enableAltScreen setting.
+        assertEquals(true, shouldReflowToKeyboard(altScreen = true, enableAltScreen = true))
+        assertEquals(true, shouldReflowToKeyboard(altScreen = true, enableAltScreen = false))
+    }
+
+    @Test
+    fun reflow_plainShellWithAltEnabled_doesNotReflow() {
+        // The #206 case: a line-mode shell keeps its row count and render-shifts
+        // instead, so a keyboard toggle never SIGWINCHes it.
+        assertEquals(false, shouldReflowToKeyboard(altScreen = false, enableAltScreen = true))
+    }
+
+    @Test
+    fun reflow_altDisabledPrimaryBufferReflows() {
+        // tmux/screen run with the alt screen disabled (native scrollback) live
+        // on the primary buffer; reflow them so their TOP status row isn't
+        // shifted off the top when the keyboard appears (the tmux-crop fix).
+        assertEquals(true, shouldReflowToKeyboard(altScreen = false, enableAltScreen = false))
+    }
 }
