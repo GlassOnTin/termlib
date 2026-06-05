@@ -408,6 +408,16 @@ fun Terminal(
      * null.
      */
     onGestureInjectorReady: ((GestureInjector) -> Unit)? = null,
+    /**
+     * Host hint: reflow (resize the PTY to the keyboard-shrunk height,
+     * SIGWINCH) on a soft-keyboard toggle, instead of keeping the row count
+     * and render-shifting (#206). The alternate screen always reflows; this
+     * lets the host opt a PRIMARY-buffer full-screen TUI in too (e.g. a tmux/
+     * screen session, or any app with mouse tracking active) so its top
+     * status row isn't shifted off the top. Default false = plain line-mode
+     * shell: keep the no-resize render-shift.
+     */
+    reflowOnKeyboard: Boolean = false,
 ) {
     if (LocalInspectionMode.current) {
         TerminalPreview(modifier, backgroundColor, foregroundColor)
@@ -448,6 +458,7 @@ fun Terminal(
         delKeyMode = delKeyMode,
         tapToPositionCursorOnPrompt = tapToPositionCursorOnPrompt,
         onGestureInjectorReady = onGestureInjectorReady,
+        reflowOnKeyboard = reflowOnKeyboard,
     )
 }
 
@@ -493,6 +504,7 @@ internal fun TerminalWithAccessibility(
     delKeyMode: DelKeyMode = DelKeyMode.Delete,
     onGestureInjectorReady: ((GestureInjector) -> Unit)? = null,
     tapToPositionCursorOnPrompt: Boolean = false,
+    reflowOnKeyboard: Boolean = false,
 ) {
     if (terminalEmulator !is TerminalEmulatorImpl) {
         Box(
@@ -1096,14 +1108,14 @@ internal fun TerminalWithAccessibility(
         // render is shifted up (keyboardCoveredPx). A full-screen TUI instead
         // sizes to the live, keyboard-shrunk height so the app reflows to fit
         // above the keyboard (its status lines stay reachable) and expects the
-        // SIGWINCH. The alternate buffer is the usual full-screen signal, but a
-        // multiplexer run with the alt screen disabled (tmux/screen on the
-        // PRIMARY buffer for native scrollback) would otherwise take the
-        // render-shift path and lose its TOP status row (e.g. tmux's scroll/
-        // copy-mode indicator) off the top — so reflow those too.
+        // SIGWINCH. The alternate buffer is the intrinsic full-screen signal;
+        // [reflowOnKeyboard] is the host's hint for a PRIMARY-buffer full-screen
+        // TUI (tmux/screen, or any app with mouse tracking active) that would
+        // otherwise take the render-shift path and lose its TOP status row
+        // (e.g. tmux's scroll/copy-mode indicator) off the top.
         val reflowToKeyboard = shouldReflowToKeyboard(
             altScreen = screenState.snapshot.altScreen,
-            enableAltScreen = terminalEmulator.enableAltScreen,
+            reflowOnKeyboard = reflowOnKeyboard,
         )
         val sizingHeight = if (reflowToKeyboard) availableHeight else maxAvailableHeight
 
@@ -2655,16 +2667,16 @@ internal fun edgeScrollRowsPerTick(
  * render-shift the grid up (#206).
  *
  * True for the alternate screen ([altScreen]: vim/less/htop and tmux-on-alt),
- * which already reflows; AND when the alternate screen is DISABLED
- * (`!`[enableAltScreen]) — a multiplexer (tmux/screen) run on the PRIMARY buffer
- * for native scrollback. The latter would otherwise take the render-shift path
- * and push its TOP status row (e.g. tmux's scroll/copy-mode indicator) off the
- * top of the viewport when the keyboard appears. A plain line-mode shell
- * (alt screen enabled, not currently on it) returns false so a keyboard toggle
- * keeps the no-resize render-shift and never SIGWINCHes the shell (#206).
+ * which intrinsically reflows; OR when the host passes [reflowOnKeyboard] —
+ * its hint that a PRIMARY-buffer full-screen TUI is running (a tmux/screen
+ * multiplexer, or any app with mouse tracking active) whose TOP status row
+ * (e.g. tmux's scroll/copy-mode indicator) would otherwise be shifted off the
+ * top. termlib stays Haven-agnostic: the host owns that policy and reduces it
+ * to this one Boolean. A plain line-mode shell passes false, so a keyboard
+ * toggle keeps the no-resize render-shift and never SIGWINCHes the shell.
  */
-internal fun shouldReflowToKeyboard(altScreen: Boolean, enableAltScreen: Boolean): Boolean =
-    altScreen || !enableAltScreen
+internal fun shouldReflowToKeyboard(altScreen: Boolean, reflowOnKeyboard: Boolean): Boolean =
+    altScreen || reflowOnKeyboard
 
 /**
  * Vertical distance (px) to translate the rendered grid UP so the bottom-most

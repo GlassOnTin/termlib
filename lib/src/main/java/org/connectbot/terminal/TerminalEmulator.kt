@@ -317,11 +317,7 @@ internal class TerminalEmulatorImpl(
     private val onResize: ((TerminalDimensions) -> Unit)? = null,
     private val onClipboardCopy: ((String) -> Unit)? = null,
     private val onProgressChange: ((ProgressState, Int) -> Unit)? = null,
-    // Non-private so the Compose layer can tell a deliberately-primary-buffer
-    // session (alt screen disabled for scrollback) apart from a plain shell
-    // when deciding whether to reflow on a soft-keyboard toggle (#206 / tmux
-    // top-row crop). Class is `internal`, so this stays module-visible.
-    val enableAltScreen: Boolean = true,
+    private val enableAltScreen: Boolean = true,
     override val autoDetectUrls: Boolean = false,
     override val boldAsBright: Boolean = true,
     maxScrollbackLines: Int = 1000,

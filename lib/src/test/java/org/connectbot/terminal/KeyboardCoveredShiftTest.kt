@@ -136,23 +136,24 @@ class KeyboardCoveredShiftTest {
     @Test
     fun reflow_altScreenAlwaysReflows() {
         // vim/less/htop and tmux-on-alt: the alt buffer reflows regardless of
-        // the enableAltScreen setting.
-        assertEquals(true, shouldReflowToKeyboard(altScreen = true, enableAltScreen = true))
-        assertEquals(true, shouldReflowToKeyboard(altScreen = true, enableAltScreen = false))
+        // the host hint.
+        assertEquals(true, shouldReflowToKeyboard(altScreen = true, reflowOnKeyboard = false))
+        assertEquals(true, shouldReflowToKeyboard(altScreen = true, reflowOnKeyboard = true))
     }
 
     @Test
-    fun reflow_plainShellWithAltEnabled_doesNotReflow() {
-        // The #206 case: a line-mode shell keeps its row count and render-shifts
-        // instead, so a keyboard toggle never SIGWINCHes it.
-        assertEquals(false, shouldReflowToKeyboard(altScreen = false, enableAltScreen = true))
+    fun reflow_plainShell_doesNotReflow() {
+        // The #206 case: a line-mode shell (no host hint, not on the alt screen)
+        // keeps its row count and render-shifts, so a keyboard toggle never
+        // SIGWINCHes it.
+        assertEquals(false, shouldReflowToKeyboard(altScreen = false, reflowOnKeyboard = false))
     }
 
     @Test
-    fun reflow_altDisabledPrimaryBufferReflows() {
-        // tmux/screen run with the alt screen disabled (native scrollback) live
-        // on the primary buffer; reflow them so their TOP status row isn't
-        // shifted off the top when the keyboard appears (the tmux-crop fix).
-        assertEquals(true, shouldReflowToKeyboard(altScreen = false, enableAltScreen = false))
+    fun reflow_hostHintReflowsPrimaryBuffer() {
+        // A PRIMARY-buffer full-screen TUI (tmux/screen, or mouse-tracking app)
+        // that the host flagged: reflow so its TOP status row isn't shifted off
+        // the top when the keyboard appears (the tmux-crop fix).
+        assertEquals(true, shouldReflowToKeyboard(altScreen = false, reflowOnKeyboard = true))
     }
 }
