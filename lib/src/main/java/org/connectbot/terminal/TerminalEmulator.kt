@@ -428,9 +428,13 @@ internal class TerminalEmulatorImpl(
      * Resize the terminal.
      */
     override fun resize(newRows: Int, newCols: Int) {
+        val oldCols = cols
+        val oldRows = rows
         rows = newRows
         cols = newCols
         terminalNative.resize(newRows, newCols)
+        // #272 diagnostics: correlate intermittent blanks with resizes.
+        Log.d(TAG, "resize ${oldRows}x$oldCols -> ${newRows}x$newCols")
 
         // Capture current default colors (thread-safe)
         val currentDefaultFg: Color
@@ -445,9 +449,21 @@ internal class TerminalEmulatorImpl(
             val oldLines = currentLines
             currentLines = List(newRows) { row ->
                 if (row < oldLines.size) {
-                    // Preserve semantic segments from the old line
-                    TerminalLine.empty(row, newCols, currentDefaultFg, currentDefaultBg)
-                        .copy(semanticSegments = oldLines[row].semanticSegments)
+                    if (newCols == oldCols) {
+                        // Width unchanged (rows-only resize — height/keyboard/split changes):
+                        // the old cells are still valid for this width, so keep the REAL
+                        // content until invalidateDisplay()'s damage re-pull refreshes it.
+                        // Blanking here let buildSnapshot() emit an all-empty screen in the
+                        // resize→re-pull window — a source of the intermittent "terminal
+                        // goes blank" (#272/#264 family). No regression: identical width =
+                        // identical cell layout, and the re-pull overwrites it momentarily.
+                        oldLines[row]
+                    } else {
+                        // Width changed (rotation): a reflow is needed, so keep only the
+                        // semantic segments and let the re-pull rebuild the cells, as before.
+                        TerminalLine.empty(row, newCols, currentDefaultFg, currentDefaultBg)
+                            .copy(semanticSegments = oldLines[row].semanticSegments)
+                    }
                 } else {
                     TerminalLine.empty(row, newCols, currentDefaultFg, currentDefaultBg)
                 }
