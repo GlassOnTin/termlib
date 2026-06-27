@@ -363,6 +363,14 @@ fun Terminal(
     maxFontSize: TextUnit = 30.sp,
     backgroundColor: Color = Color.Black,
     foregroundColor: Color = Color.White,
+    /**
+     * Alpha applied to the screen-fill background only (0.0 = fully
+     * transparent, 1.0 = opaque). Cell backgrounds keep their own colour;
+     * default/empty cells skip painting and so reveal whatever sits behind
+     * the Canvas (the host can make its window translucent for a wallpaper
+     * see-through effect). Default 1.0 = unchanged opaque fill.
+     */
+    backgroundOpacity: Float = 1f,
     selectionBackgroundColor: Color = Color(0xFFB3D7FF),
     selectionForegroundColor: Color = Color.Black,
     keyboardEnabled: Boolean = false,
@@ -433,6 +441,7 @@ fun Terminal(
         maxFontSize = maxFontSize,
         backgroundColor = backgroundColor,
         foregroundColor = foregroundColor,
+        backgroundOpacity = backgroundOpacity,
         keyboardEnabled = keyboardEnabled,
         showSoftKeyboard = showSoftKeyboard,
         focusRequester = focusRequester,
@@ -478,6 +487,7 @@ internal fun TerminalWithAccessibility(
     maxFontSize: TextUnit = 30.sp,
     backgroundColor: Color = Color.Black,
     foregroundColor: Color = Color.White,
+    backgroundOpacity: Float = 1f,
     keyboardEnabled: Boolean = false,
     showSoftKeyboard: Boolean = true,
     focusRequester: FocusRequester = remember { FocusRequester() },
@@ -2037,9 +2047,14 @@ internal fun TerminalWithAccessibility(
                         // Hide Canvas from accessibility tree - AccessibilityOverlay provides semantic structure
                     },
             ) {
-                // Fill background
+                // Fill background. backgroundOpacity < 1 makes only this
+                // screen-fill translucent; default/empty cells skip painting
+                // (see drawLine's defaultBg check) so they reveal whatever the
+                // host renders behind the Canvas (e.g. the device wallpaper via
+                // a translucent window). Cell-coloured backgrounds stay opaque.
                 drawRect(
-                    color = backgroundColor,
+                    color = if (backgroundOpacity >= 1f) backgroundColor
+                        else backgroundColor.copy(alpha = backgroundOpacity),
                     size = size,
                 )
 
