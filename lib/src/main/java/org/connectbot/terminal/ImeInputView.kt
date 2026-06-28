@@ -362,6 +362,16 @@ internal class ImeInputView(
          */
         private var pendingReplacementLength: Int = 0
 
+        /**
+         * In `fullEditor` mode (Standard / Compose), text the IME tried to
+         * compose while a sticky Ctrl/Alt was active — already dispatched to
+         * the terminal eagerly as a control combo (so e.g. Ctrl-D fires now
+         * and the one-shot modifier is consumed instead of leaking onto the
+         * next Enter as `^[[13;5u`). Remembered so the IME's follow-up
+         * [commitText] of the same text doesn't send it a second time. (#298)
+         */
+        private var eagerControlText: String = ""
+
         override fun setComposingRegion(start: Int, end: Int): Boolean {
             Log.d(TAG, "setComposingRegion(start=$start, end=$end) composingText.len=${composingText.length}")
             super.setComposingRegion(start, end)
@@ -411,6 +421,31 @@ internal class ImeInputView(
                 notifyImeSelection()
                 return true
             }
+
+            if (keyboardHandler.hasStickyCtrlOrAlt()) {
+                // A sticky Ctrl/Alt (toolbar) is active: this keystroke is a
+                // control combo, not a composition. Dispatch the new
+                // character(s) straight to the terminal — onTextInput applies
+                // the modifier, so Ctrl-D becomes ^D — and remember them so
+                // the IME's follow-up commitText of the same text doesn't
+                // send them again. Consuming the modifier here stops it
+                // leaking onto the next dispatched key, which would otherwise
+                // encode Enter as ^[[13;5u (CSI-u Ctrl+Enter). #298
+                val delta = if (newText.startsWith(eagerControlText)) {
+                    newText.substring(eagerControlText.length)
+                } else {
+                    newText // shrink/replacement: best-effort, send as-is
+                }
+                if (delta.isNotEmpty()) sendTextInput(delta)
+                eagerControlText = newText
+                composingText = ""
+                _composingText.value = ""
+                notifyImeSelection()
+                return true
+            }
+            // A normal (unmodified) composition is starting/continuing — drop
+            // any stale control-combo guard so a later commit isn't skipped.
+            eagerControlText = ""
 
             super.setComposingText(text, newCursorPosition)
 
@@ -484,6 +519,8 @@ internal class ImeInputView(
             if (fullEditor) {
                 _composingText.value = ""
             }
+            // Composition ended; a control combo (if any) is fully consumed.
+            eagerControlText = ""
             // Either applied above or cancelled without a commit — either
             // way, don't carry a pending length into an unrelated future
             // commit.
@@ -716,6 +753,18 @@ internal class ImeInputView(
             super.commitText(text, newCursorPosition)
             suppressKeyEvents = false
 
+            // The IME is committing text we already dispatched eagerly as a
+            // control combo (sticky Ctrl/Alt was active during composition,
+            // #298). Don't send it again — just clear the guard and state.
+            if (eagerControlText.isNotEmpty() && committedText == eagerControlText) {
+                eagerControlText = ""
+                composingText = ""
+                _composingText.value = ""
+                notifyImeSelection()
+                return true
+            }
+            eagerControlText = ""
+
             if (committedText.isNotEmpty()) {
                 // The floating-composer model never projects the in-flight
                 // composition into the terminal, so there is nothing to erase
@@ -811,6 +860,7 @@ internal class ImeInputView(
             composingText = ""
             _composingText.value = ""
             pendingReplacementLength = 0
+            eagerControlText = ""
             // Stale entries here would suppress legitimate keypresses
             // typed after a mode-change restartInput. Clear with the rest
             // of the per-connection state.
@@ -830,6 +880,7 @@ internal class ImeInputView(
                 _composingText.value = ""
             }
             pendingReplacementLength = 0
+            eagerControlText = ""
         }
 
         /** Drop any pending setComposingRegion replacement without consuming it. */

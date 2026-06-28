@@ -892,4 +892,115 @@ class ImeInputViewTest {
 
         assertEquals(" ", effectiveText(outputs))
     }
+
+    // === Standard keyboard mode: sticky Ctrl/Alt must not get stuck (#298) ===
+    //
+    // In Standard (fullEditor) mode the IME composes typed characters in a
+    // floating overlay and only commits on a word boundary. A sticky toolbar
+    // Ctrl tapped before such a character used to never get consumed (the char
+    // was composed, producing no terminal output), so it leaked onto the next
+    // dispatched key — turning Enter into Ctrl+Enter, which libvterm encodes as
+    // ^[[13;5u (CSI-u). zsh then echoed the literal bytes and choked. The fix
+    // eager-dispatches control combos so Ctrl-D fires now and the modifier is
+    // consumed immediately.
+
+    private class TestModifierManager(
+        var ctrl: Boolean = false,
+        var alt: Boolean = false,
+    ) : ModifierManager {
+        override fun isCtrlActive() = ctrl
+        override fun isAltActive() = alt
+        override fun isShiftActive() = false
+        // Mirror the production one-shot reset (TerminalScreen wires
+        // clearTransients -> viewModel.clearStickyModifiers).
+        override fun clearTransients() { ctrl = false; alt = false }
+    }
+
+    private fun createFullEditorCaptureWithModifiers(
+        mods: TestModifierManager,
+    ): Triple<InputConnection, KeyboardHandler, MutableList<ByteArray>> {
+        val outputs = mutableListOf<ByteArray>()
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 24,
+            initialCols = 80,
+            onKeyboardInput = { data -> outputs.add(data.copyOf()) },
+        )
+        val handler = KeyboardHandler(emulator)
+        handler.modifierManager = mods
+        var ic: InputConnection? = null
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            val view = ImeInputView(context, handler)
+            view.isComposeModeActive = true // fullEditor path (== Standard mode)
+            ic = view.onCreateInputConnection(EditorInfo())
+        }
+        return Triple(ic!!, handler, outputs)
+    }
+
+    private fun composeKeyDown(keyCode: Int) =
+        androidx.compose.ui.input.key.KeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+
+    @Test
+    fun testStandardModeCtrlComboDispatchesControlCharAndConsumesModifier() {
+        val mods = TestModifierManager(ctrl = true)
+        val (ic, _, outputs) = createFullEditorCaptureWithModifiers(mods)
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("d", 1)
+        }
+        drainMainLooper()
+
+        val bytes = outputs.flatMap { it.toList() }.toByteArray()
+        assertTrue("Ctrl+D should reach the terminal as ^D (0x04)", bytes.contains(0x04.toByte()))
+        assertFalse("the one-shot Ctrl must be consumed by the dispatch", mods.ctrl)
+    }
+
+    @Test
+    fun testStandardModeCtrlDoesNotLeakOntoEnter() {
+        val mods = TestModifierManager(ctrl = true)
+        val (ic, handler, outputs) = createFullEditorCaptureWithModifiers(mods)
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("d", 1) // Ctrl consumed here
+            handler.onKeyEvent(composeKeyDown(KeyEvent.KEYCODE_ENTER))
+        }
+        drainMainLooper()
+
+        val bytes = outputs.flatMap { it.toList() }.toByteArray()
+        assertTrue("Ctrl+D should emit ^D", bytes.contains(0x04.toByte()))
+        assertTrue("Enter should emit CR (0x0D)", bytes.contains(0x0D.toByte()))
+        assertFalse(
+            "Enter must not be encoded as Ctrl+Enter CSI-u (^[[13;5u contains ESC 0x1B)",
+            bytes.contains(0x1B.toByte()),
+        )
+    }
+
+    @Test
+    fun testStandardModeCtrlComboFollowUpCommitDoesNotDouble() {
+        val mods = TestModifierManager(ctrl = true)
+        val (ic, _, outputs) = createFullEditorCaptureWithModifiers(mods)
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("d", 1) // eager ^D
+            ic.commitText("d", 1) // IME committing the same text — must be skipped
+        }
+        drainMainLooper()
+
+        val bytes = outputs.flatMap { it.toList() }.toByteArray()
+        assertEquals("exactly one ^D, no follow-up plain 'd'", 1, bytes.size)
+        assertEquals(0x04.toByte(), bytes[0])
+    }
+
+    @Test
+    fun testStandardModeNormalCompositionUnaffectedByCtrlFix() {
+        val mods = TestModifierManager(ctrl = false)
+        val (ic, _, outputs) = createFullEditorCaptureWithModifiers(mods)
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("a", 1) // floating — no terminal output yet
+            ic.commitText("a", 1)
+        }
+        drainMainLooper()
+
+        assertEquals("a", effectiveText(outputs))
+    }
 }

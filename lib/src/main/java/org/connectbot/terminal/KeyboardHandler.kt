@@ -343,6 +343,16 @@ internal class KeyboardHandler(
     }
 
     /**
+     * Whether a sticky (toolbar) Ctrl or Alt is currently active. Shift is
+     * excluded — it's part of ordinary typing and never turns a key into a
+     * control combo. Used by the IME path to route a modified keystroke
+     * straight to the terminal instead of composing it, so e.g. Ctrl-D
+     * fires immediately and the one-shot modifier is consumed rather than
+     * leaking onto the next dispatched key. (#298)
+     */
+    fun hasStickyCtrlOrAlt(): Boolean = (getModifierMask() and 0b110) != 0
+
+    /**
      * Convert a Compose KeyEvent to its Unicode codepoint, handling dead-key composition.
      *
      * Uses the Android KeyCharacterMap to handle all key layouts and shift states correctly,
