@@ -372,6 +372,16 @@ internal class ImeInputView(
          */
         private var eagerControlText: String = ""
 
+        /**
+         * #298: text we flushed to the shell when Enter arrived mid-composition
+         * (see [flushComposingBeforeEnter]). Consumed once so an IME that
+         * re-delivers the same line via a later [commitText] (SwiftKey commits
+         * on the *next* word boundary, after the newline) doesn't double-send
+         * it. Any other commit clears it. Lives only on this connection, so a
+         * mode-change `restartInput` (new connection) resets it.
+         */
+        private var enterFlushedText: String = ""
+
         override fun setComposingRegion(start: Int, end: Int): Boolean {
             Log.d(TAG, "setComposingRegion(start=$start, end=$end) composingText.len=${composingText.length}")
             super.setComposingRegion(start, end)
@@ -623,6 +633,28 @@ internal class ImeInputView(
         }
 
         /**
+         * #298: in fullEditor (Standard / Compose) mode the typed line lives
+         * only in the floating composing buffer and reaches the shell on
+         * [commitText]. Gboard commits before sending Enter, so it's fine — but
+         * some IMEs (SwiftKey) send Enter while a composition is still in flight
+         * and only commit it on the *next* word boundary. The bare newline then
+         * lands on an empty prompt and the line shows up, late, on the next
+         * prompt. Flush the pending composition to the shell *before* the
+         * newline so ordering is right, and arm [enterFlushedText] so the IME's
+         * later re-delivery of the same text is dropped instead of duplicated.
+         * No-op in Secure mode (each char was already committed) and when
+         * nothing is composing (the common Gboard / commit-then-Enter path).
+         */
+        private fun flushComposingBeforeEnter() {
+            if (!fullEditor || composingText.isEmpty()) return
+            val pending = composingText
+            sendTextInput(pending)
+            enterFlushedText = pending
+            composingText = ""
+            _composingText.value = ""
+        }
+
+        /**
          * IME moved the cursor explicitly (e.g. the user tapped to
          * place the caret inside an existing word). Mirror the new
          * position back to Gboard so its tracked selection stays in
@@ -674,6 +706,9 @@ internal class ImeInputView(
                 // Real Enter from IME — cancel any deferred commitText Enter
                 enterHandledByKeyEvent = true
                 handler.removeCallbacks(enterFallbackRunnable)
+                // #298: send any in-flight composition to the shell before the
+                // newline, so a still-composing line isn't lost / delivered late.
+                flushComposingBeforeEnter()
             }
             val result = this@ImeInputView.dispatchKeyEvent(event)
             // Clear the IME's text buffer + reset selection ONLY on Enter.
@@ -765,6 +800,21 @@ internal class ImeInputView(
             }
             eagerControlText = ""
 
+            // #298: this is the IME re-delivering a line we already flushed to
+            // the shell when Enter arrived mid-composition. Drop it (consume the
+            // guard) so it isn't sent twice. Any non-matching commit clears the
+            // guard so a later, legitimately-identical command isn't suppressed.
+            if (enterFlushedText.isNotEmpty()) {
+                if (committedText == enterFlushedText) {
+                    enterFlushedText = ""
+                    composingText = ""
+                    _composingText.value = ""
+                    notifyImeSelection()
+                    return true
+                }
+                enterFlushedText = ""
+            }
+
             if (committedText.isNotEmpty()) {
                 // The floating-composer model never projects the in-flight
                 // composition into the terminal, so there is nothing to erase
@@ -786,6 +836,10 @@ internal class ImeInputView(
                     }
                     sendTextInput(filtered)
                 } else if (committedText.contains('\n') || committedText.contains('\r')) {
+                    // #298: pure-newline commit while still composing — flush the
+                    // in-flight line before the deferred Enter (same ordering fix
+                    // as the sendKeyEvent path, for IMEs that submit via commitText).
+                    flushComposingBeforeEnter()
                     // Defer Enter dispatch — give sendKeyEvent a chance to handle it
                     enterHandledByKeyEvent = false
                     handler.removeCallbacks(enterFallbackRunnable)

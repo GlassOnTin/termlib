@@ -371,6 +371,66 @@ class ImeInputViewTest {
         assertEquals("x", effectiveText(outputs))
     }
 
+    // === #298: Enter while still composing (Standard mode / SwiftKey) ===
+    // In fullEditor mode the typed line lives in the floating composing buffer
+    // and only reaches the shell on commitText. SwiftKey sends Enter via
+    // sendKeyEvent mid-composition, so the line must be flushed BEFORE the
+    // newline rather than arriving (late) on the next prompt.
+
+    @Test
+    fun testEnterFlushesPendingCompositionInFullEditor() {
+        val (ic, outputs) = createKeyboardOutputCapture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("ls", 1) // composing, not yet committed
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+        }
+        drainMainLooper()
+        // The line reached the shell exactly once (CR is stripped by effectiveText).
+        assertEquals("ls", effectiveText(outputs))
+        // ...and the Enter (CR) reached the terminal too.
+        assertTrue("Enter did not reach the terminal", outputs.any { it.contains(0x0D.toByte()) })
+    }
+
+    @Test
+    fun testEnterFlushedLineNotDuplicatedOnLateRecommit() {
+        val (ic, outputs) = createKeyboardOutputCapture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("ls", 1)
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+            ic.commitText("ls", 1) // SwiftKey re-delivers the line after the newline
+        }
+        drainMainLooper()
+        // Suppressed by the one-shot guard — "ls", not "lsls".
+        assertEquals("ls", effectiveText(outputs))
+    }
+
+    @Test
+    fun testEnterAfterCommitDoesNotSuppressIdenticalNextCommand() {
+        // Gboard path: it commits before Enter, so nothing is composing at Enter
+        // and the guard is never armed — a legitimately-identical second command
+        // must still reach the shell.
+        val (ic, outputs) = createKeyboardOutputCapture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.commitText("ls", 1)
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+            ic.commitText("ls", 1)
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+        }
+        drainMainLooper()
+        assertEquals("lsls", effectiveText(outputs))
+    }
+
+    @Test
+    fun testEnterWithNoCompositionStillReachesTerminal() {
+        val (ic, outputs) = createKeyboardOutputCapture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+        }
+        drainMainLooper()
+        assertEquals("", effectiveText(outputs))
+        assertTrue("Enter did not reach the terminal", outputs.any { it.contains(0x0D.toByte()) })
+    }
+
     // === Unicode precomposition (NFC normalization) ===
 
     /**
