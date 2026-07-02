@@ -786,6 +786,69 @@ class ImeInputViewTest {
         assertTrue("DEL via deleteSurroundingText did not reach the terminal", received.contains(0x7F.toByte()))
     }
 
+    // === #298: Secure mode commitText after composition must not double-send ===
+    // Default (Secure) mode eager-sends each composition delta via
+    // setComposingText → applyComposingDelta. An IME that then *commits* the
+    // word (Gboard-style commitText, unlike Samsung's finishComposingText) used
+    // to have commitText re-send the whole word, so the shell saw "lsls" and
+    // Ctrl+D never landed on an empty prompt. agross hit exactly this in default
+    // Secure mode (#298); the earlier #298 fix only covered Standard (fullEditor)
+    // mode, which is why it didn't help.
+
+    @Test
+    fun testSecureModeComposeThenCommitDoesNotDouble() {
+        val (ic, _, outputs) = createNonComposeModeCapture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("l", 1)
+            ic.setComposingText("ls", 1)
+            ic.commitText("ls", 1)
+        }
+        drainMainLooper()
+        assertEquals("ls", effectiveText(outputs))
+    }
+
+    @Test
+    fun testSecureModeComposeThenCommitTrailingSpace() {
+        // IME commits the composed word plus a trailing space in one commitText.
+        // Only the delta (" ") should reach the shell, never the whole "ls" again.
+        val (ic, _, outputs) = createNonComposeModeCapture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("l", 1)
+            ic.setComposingText("ls", 1)
+            ic.commitText("ls ", 1)
+        }
+        drainMainLooper()
+        assertEquals("ls ", effectiveText(outputs))
+    }
+
+    @Test
+    fun testSecureModeComposeThenCommitThenEnterKeyEvent() {
+        // Full realistic "ls<enter>" Secure path: compose, commit, then a
+        // separate ENTER via sendKeyEvent. The line reaches the shell once, + CR.
+        val (ic, _, outputs) = createNonComposeModeCapture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("ls", 1)
+            ic.commitText("ls", 1)
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+        }
+        drainMainLooper()
+        assertEquals("ls", effectiveText(outputs))
+        assertTrue("Enter did not reach the terminal", outputs.any { it.contains(0x0D.toByte()) })
+    }
+
+    @Test
+    fun testSecureModeDirectCommitWithoutComposingUnaffected() {
+        // No composition first (some IMEs commit per key in Secure mode): the
+        // char must still be delivered exactly once — the anti-double guard is
+        // armed by an active composition only, so it must not eat this.
+        val (ic, _, outputs) = createNonComposeModeCapture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.commitText("x", 1)
+        }
+        drainMainLooper()
+        assertEquals("x", effectiveText(outputs))
+    }
+
     // === DelKeyMode IME tests ===
 
     private fun createNonComposeModeWithMode(delKeyMode: DelKeyMode): Pair<InputConnection, MutableList<ByteArray>> {

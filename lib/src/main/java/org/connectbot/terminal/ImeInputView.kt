@@ -815,6 +815,27 @@ internal class ImeInputView(
                 enterFlushedText = ""
             }
 
+            // #298: Secure mode (the default, fullEditor=false) already
+            // eager-sent this composition char-by-char via setComposingText ->
+            // applyComposingDelta. commitText must NOT re-send the whole word —
+            // doing so made the shell see "lsls" and left Ctrl+D on a non-empty
+            // prompt (so it never logged out). Reconcile only the delta between
+            // what we already sent and the final commit (autocorrect / trailing
+            // space / shrink) via the same applyComposingDelta, then consume.
+            // Enter still arrives via the IME's separate sendKeyEvent, exactly
+            // as in the eager finishComposingText path. fullEditor (Standard /
+            // CJK) uses the floating composer and is unaffected; a bare commit
+            // with no active composition (composingText empty) falls through to
+            // the normal dispatch below.
+            if (!fullEditor && composingText.isNotEmpty()) {
+                val filtered = committedText.replace("\n", "").replace("\r", "")
+                if (filtered.isNotEmpty()) applyComposingDelta(composingText, filtered)
+                composingText = ""
+                _composingText.value = ""
+                notifyImeSelection()
+                return true
+            }
+
             if (committedText.isNotEmpty()) {
                 // The floating-composer model never projects the in-flight
                 // composition into the terminal, so there is nothing to erase
