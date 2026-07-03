@@ -1126,4 +1126,127 @@ class ImeInputViewTest {
 
         assertEquals("a", effectiveText(outputs))
     }
+
+    // === #298 (agross repro): Enter mid-composition in Standard/Compose mode ===
+    // "ls<Return>ls<Return>exit" reached the shell as "lslsexit" — the composed
+    // line and/or its Enter never arrived, so lines concatenated on one prompt.
+    // These drive the three routes an IME can take to end a line and assert the
+    // shell receives the text AND the newline, exactly once, in order.
+
+    /** Raw bytes to the PTY, undecoded — newline assertions need the \r. */
+    private fun rawText(outputs: List<ByteArray>): String =
+        outputs.flatMap { it.toList() }.toByteArray().toString(Charsets.UTF_8)
+
+    /** Run delayed main-looper tasks (the 16 ms deferred-Enter fallback). */
+    private fun advanceMainLooper(ms: Long = 32) {
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(ms))
+    }
+
+    @Test
+    fun testComposeModeFinishComposingThenEnterKeySendsLine() {
+        // Route 1: IME accepts the composition via finishComposingText() (no
+        // commitText), then sends Enter as a key event.
+        val (ic, outputs) = createKeyboardOutputCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("l", 1)
+            ic.setComposingText("ls", 1)
+            ic.finishComposingText()
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+        }
+        drainMainLooper()
+
+        assertEquals("ls\r", rawText(outputs))
+    }
+
+    @Test
+    fun testComposeModeCommitNewlineMidCompositionSendsLineThenEnter() {
+        // Route 2: IME submits with a pure-newline commit while the word is
+        // still composing (SwiftKey-style).
+        val (ic, outputs) = createKeyboardOutputCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("ls", 1)
+            ic.commitText("\n", 1)
+        }
+        advanceMainLooper()
+        drainMainLooper()
+
+        assertEquals("ls\r", rawText(outputs))
+    }
+
+    @Test
+    fun testComposeModeMixedCommitWithTrailingNewlineSendsEnter() {
+        // Route 3: IME submits the line as ONE commit, text + newline together.
+        // The newline must not be silently dropped.
+        val (ic, outputs) = createKeyboardOutputCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("ls", 1)
+            ic.commitText("ls\n", 1)
+        }
+        advanceMainLooper()
+        drainMainLooper()
+
+        assertEquals("ls\r", rawText(outputs))
+    }
+
+    @Test
+    fun testComposeModeRepeatedLinesDoNotConcatenate() {
+        // The full agross sequence over route 1: ls⏎ ls⏎ exit⏎ must reach the
+        // shell as three executed lines, not "lslsexit".
+        val (ic, outputs) = createKeyboardOutputCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            for (word in listOf("ls", "ls", "exit")) {
+                var partial = ""
+                for (ch in word) {
+                    partial += ch
+                    ic.setComposingText(partial, 1)
+                }
+                ic.finishComposingText()
+                ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+                ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
+            }
+        }
+        drainMainLooper()
+
+        assertEquals("ls\rls\rexit\r", rawText(outputs))
+    }
+
+    @Test
+    fun testComposeModeMixedCommitRepeatedLinesDoNotConcatenate() {
+        // The same sequence over route 3 (one-shot "word\n" commits).
+        val (ic, outputs) = createKeyboardOutputCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            for (word in listOf("ls", "ls", "exit")) {
+                ic.setComposingText(word, 1)
+                ic.commitText("$word\n", 1)
+            }
+        }
+        advanceMainLooper()
+        drainMainLooper()
+
+        assertEquals("ls\rls\rexit\r", rawText(outputs))
+    }
+
+    @Test
+    fun testComposeModeCommitThenEnterKeyStillSingleEnter() {
+        // Regression guard: the common Gboard path (commit the word, then a
+        // separate Enter key event) must still produce exactly one Enter —
+        // the mixed-commit fix must not stack a deferred second Enter.
+        val (ic, outputs) = createKeyboardOutputCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.setComposingText("ls", 1)
+            ic.commitText("ls", 1)
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+        }
+        advanceMainLooper()
+        drainMainLooper()
+
+        assertEquals("ls\r", rawText(outputs))
+    }
 }

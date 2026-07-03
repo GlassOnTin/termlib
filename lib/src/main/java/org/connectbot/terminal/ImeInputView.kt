@@ -523,6 +523,16 @@ internal class ImeInputView(
                 // each char via setComposingText.)
                 sendBackspaces(pendingReplacementLength)
                 sendTextInput(composingText)
+            } else if (fullEditor && composingText.isNotEmpty()) {
+                // #298 (agross): in fullEditor mode the composition lives only
+                // in the floating overlay and reaches the shell on commitText —
+                // which never comes when the IME accepts the line via
+                // finishComposingText + Enter key event. finishComposingText
+                // means "the composed text IS the final text": send it now, or
+                // the line is lost and the Enter lands on an empty prompt (the
+                // shell just draws a new prompt and the typing accumulates).
+                // Secure mode is excluded — it already eager-sent every char.
+                sendTextInput(composingText)
             }
 
             composingText = ""
@@ -628,6 +638,11 @@ internal class ImeInputView(
                 this@ImeInputView.dispatchKeyEvent(
                     KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER),
                 )
+                // #298: mirror the sendKeyEvent(ENTER) bookkeeping — this path
+                // bypasses that override, so without the reset a commitText-only
+                // IME accumulates every command into one suggestion context.
+                editable?.clear()
+                onUpdateSelection(this@ImeInputView, 0, 0, -1, -1)
             }
             enterHandledByKeyEvent = false
         }
@@ -855,7 +870,33 @@ internal class ImeInputView(
                         sendBackspaces(pendingReplacementLength)
                         pendingReplacementLength = 0
                     }
-                    sendTextInput(filtered)
+                    if (committedText.contains('\n') || committedText.contains('\r')) {
+                        // #298 (agross): mixed text+newline commit — IMEs that
+                        // submit the whole line as ONE commit ("ls\n"), and
+                        // multi-line clipboard paste. The newlines used to be
+                        // silently dropped, so successive lines concatenated on
+                        // one prompt ("ls⏎ls⏎exit" arrived as "lslsexit").
+                        // Dispatch text and Enters synchronously, in order. No
+                        // deferral here: the dual commitText("\n")+sendKeyEvent
+                        // delivery that needs dedup only happens for the
+                        // pure-newline commit handled in the branch below.
+                        val normalized = committedText
+                            .replace("\r\n", "\n").replace('\r', '\n')
+                        normalized.split('\n').forEachIndexed { i, segment ->
+                            if (i > 0) {
+                                this@ImeInputView.dispatchKeyEvent(
+                                    KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER),
+                                )
+                                // Line boundary — same IME-state reset as the
+                                // sendKeyEvent(ENTER) path.
+                                editable?.clear()
+                                onUpdateSelection(this@ImeInputView, 0, 0, -1, -1)
+                            }
+                            if (segment.isNotEmpty()) sendTextInput(segment)
+                        }
+                    } else {
+                        sendTextInput(filtered)
+                    }
                 } else if (committedText.contains('\n') || committedText.contains('\r')) {
                     // #298: pure-newline commit while still composing — flush the
                     // in-flight line before the deferred Enter (same ordering fix
