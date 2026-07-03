@@ -324,6 +324,79 @@ class KeyboardHandlerTest {
     }
 
     @Test
+    fun testComposeModeEnterCommitsTextAndSubmitsLine() {
+        // #298-family: "Enter commits the buffer to the shell" means the LINE
+        // executes — the terminal must receive the text AND the newline. The
+        // Enter used to be silently dropped, so successive composed lines
+        // concatenated on one prompt ("lslsexit").
+        val outputs = mutableListOf<ByteArray>()
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 24,
+            initialCols = 80,
+            onKeyboardInput = { data -> outputs.add(data.copyOf()) },
+        )
+        val handler = KeyboardHandler(emulator)
+        val composeMode = ComposeMode()
+        composeMode.activate()
+        handler.composeMode = composeMode
+
+        handler.onKeyEvent(createKeyEvent(Key.A, KeyEventType.KeyDown))
+        handler.onKeyEvent(createKeyEvent(Key.B, KeyEventType.KeyDown))
+        handler.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown))
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+
+        val received = outputs.flatMap { it.toList() }.toByteArray().toString(Charsets.UTF_8)
+        assertEquals("ab\r", received)
+    }
+
+    @Test
+    fun testComposeModeEnterWithEmptyBufferStillSendsEnter() {
+        // Enter on an empty compose buffer must behave like a normal Enter
+        // (execute the empty line / redraw the prompt), not vanish.
+        val outputs = mutableListOf<ByteArray>()
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 24,
+            initialCols = 80,
+            onKeyboardInput = { data -> outputs.add(data.copyOf()) },
+        )
+        val handler = KeyboardHandler(emulator)
+        val composeMode = ComposeMode()
+        composeMode.activate()
+        handler.composeMode = composeMode
+
+        handler.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown))
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+
+        val received = outputs.flatMap { it.toList() }.toByteArray().toString(Charsets.UTF_8)
+        assertEquals("\r", received)
+        assertFalse("compose deactivates on commit", composeMode.isActive)
+    }
+
+    @Test
+    fun testComposeModeImeTextThenEnterSubmitsLine() {
+        // The soft-keyboard path: IME words arrive via onTextInput (buffered
+        // into the compose overlay), then the IME's Enter arrives as a key
+        // event. This is the exact HeliBoard flow observed on-device.
+        val outputs = mutableListOf<ByteArray>()
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 24,
+            initialCols = 80,
+            onKeyboardInput = { data -> outputs.add(data.copyOf()) },
+        )
+        val handler = KeyboardHandler(emulator)
+        val composeMode = ComposeMode()
+        composeMode.activate()
+        handler.composeMode = composeMode
+
+        handler.onTextInput("ls".toByteArray(Charsets.UTF_8))
+        handler.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown))
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+
+        val received = outputs.flatMap { it.toList() }.toByteArray().toString(Charsets.UTF_8)
+        assertEquals("ls\r", received)
+    }
+
+    @Test
     fun testComposeModeDoesNotInterceptWhenInactive() {
         val composeMode = ComposeMode()
         keyboardHandler.composeMode = composeMode

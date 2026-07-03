@@ -130,6 +130,13 @@ internal class KeyboardHandler(
                     text?.codePoints()?.forEach { codepoint ->
                         terminalEmulator.dispatchCharacter(0, codepoint)
                     }
+                    // #298-family: forward the Enter itself. "Commit to the
+                    // shell" means the line executes — dropping the newline
+                    // left composed lines concatenating on one prompt
+                    // ("ls⏎ls⏎exit" echoed as "lslsexit", never run). An
+                    // empty buffer behaves like a normal Enter rather than
+                    // silently eating the key.
+                    terminalEmulator.dispatchKey(0, VTermKey.ENTER)
                     onInputProcessed?.invoke()
                 }
 
