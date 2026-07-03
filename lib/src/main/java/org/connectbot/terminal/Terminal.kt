@@ -2141,10 +2141,17 @@ internal fun TerminalWithAccessibility(
                     )
                 }
 
-                // Draw compose mode overlay
+                // Draw compose mode overlay. The accumulated buffer and the
+                // in-flight IME composition render as ONE run — they used to be
+                // two overlays anchored at the same cursor cell, so while an
+                // IME held a live composition (HeliBoard composes every word)
+                // the current word overpainted the buffered ones and the
+                // overlay appeared to "erase" earlier words until Enter.
+                // Gboard commits words quickly, which is why it looked fine
+                // there.
                 if (composeMode.isActive && screenState.scrollbackPosition == 0) {
                     drawComposeOverlay(
-                        buffer = composeMode.buffer,
+                        buffer = composeMode.buffer + imeComposerText,
                         cursorRow = screenState.snapshot.cursorRow,
                         cursorCol = screenState.snapshot.cursorCol,
                         totalCols = screenState.snapshot.cols,
@@ -2157,8 +2164,10 @@ internal fun TerminalWithAccessibility(
 
                 // Draw IME composer overlay (romaji/pinyin etc. mid-composition).
                 // Rendered at the cursor; the remote shell sees nothing until the
-                // IME calls commitText() with the final selection.
-                if (imeComposerText.isNotEmpty() && screenState.scrollbackPosition == 0) {
+                // IME calls commitText() with the final selection. In compose
+                // mode the live composition is already folded into the compose
+                // overlay above.
+                if (!composeMode.isActive && imeComposerText.isNotEmpty() && screenState.scrollbackPosition == 0) {
                     drawImeComposerOverlay(
                         text = imeComposerText,
                         cursorRow = screenState.snapshot.cursorRow,
