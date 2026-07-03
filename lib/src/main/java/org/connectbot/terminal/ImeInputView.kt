@@ -140,6 +140,30 @@ internal class ImeInputView(
         activeConnection?.flushCompositionAsBackspaces()
     }
 
+    private val restartImeRunnable = Runnable {
+        _composingText.value = ""
+        inputMethodManager.restartInput(this)
+    }
+
+    /**
+     * Reset the IME's own state at a line boundary (#298, round 5 — SwiftKey).
+     *
+     * On Enter we clear the Editable and reset the selection, but that isn't
+     * enough for every IME: SwiftKey keeps its internal composition context
+     * across it, so the next word arrives as `<stale line>+<word>` — typed
+     * `ls` after an executed `nas` reached the shell as `nasls`, and the
+     * suggestion bar visibly still offered the dead line. `restartInput` is
+     * the canonical "the text changed under you" signal and makes every IME
+     * drop its composition/prediction state. Posted (not called inline) so it
+     * never re-enters the framework from inside an active InputConnection
+     * callback, and debounced so an Enter burst restarts once. fullEditor
+     * only — Secure mode never composes and Raw mode has no InputConnection.
+     */
+    internal fun postRestartImeAtLineBoundary() {
+        removeCallbacks(restartImeRunnable)
+        post(restartImeRunnable)
+    }
+
     /**
      * Show the IME forcefully. This is more reliable than SoftwareKeyboardController.
      */
@@ -643,6 +667,7 @@ internal class ImeInputView(
                 // IME accumulates every command into one suggestion context.
                 editable?.clear()
                 onUpdateSelection(this@ImeInputView, 0, 0, -1, -1)
+                if (fullEditor) postRestartImeAtLineBoundary()
             }
             enterHandledByKeyEvent = false
         }
@@ -738,6 +763,11 @@ internal class ImeInputView(
             if (isEnterDown) {
                 editable?.clear()
                 onUpdateSelection(this@ImeInputView, 0, 0, -1, -1)
+                // #298 round 5: SwiftKey needs a full IME restart to drop its
+                // composition context at the line boundary — selection reset
+                // alone leaves the dead line in its buffer and the next word
+                // arrives as "<stale>+<word>".
+                if (fullEditor) postRestartImeAtLineBoundary()
             }
             return result
         }
@@ -894,6 +924,9 @@ internal class ImeInputView(
                             }
                             if (segment.isNotEmpty()) sendTextInput(segment)
                         }
+                        // One IME restart after the batch (not per segment) —
+                        // same SwiftKey line-boundary reset as the key path.
+                        if (fullEditor) postRestartImeAtLineBoundary()
                     } else {
                         sendTextInput(filtered)
                     }
