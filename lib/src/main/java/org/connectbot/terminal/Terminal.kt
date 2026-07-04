@@ -692,6 +692,14 @@ internal fun TerminalWithAccessibility(
         ceil(-textPaint.fontMetrics.ascent)
     }
 
+    // The gesture handler below is pointerInput(terminalEmulator, gestureCallback),
+    // which never restarts on a font-size change — a pinch-zoom would leave its
+    // long-lived coroutine holding the pre-zoom metrics, so every later touch
+    // maps to the wrong cell. Route the metrics through State (same pattern as
+    // the currentOn* callbacks) so reads inside the handler are always current.
+    val currentCharWidth = rememberUpdatedState(baseCharWidth)
+    val currentCharHeight = rememberUpdatedState(baseCharHeight)
+
     // Scroll animation state
     val scrollOffset = remember(terminalEmulator) { Animatable(0f) }
     val maxScroll = remember(screenState.snapshot.scrollback.size, baseCharHeight) {
@@ -1309,6 +1317,10 @@ internal fun TerminalWithAccessibility(
             })
                 .onGloballyPositioned { contentOriginInRoot = it.positionInRoot() }
                 .pointerInput(terminalEmulator, gestureCallback) {
+                // Shadow the composition-scope metrics with fresh State reads:
+                // this block's closure outlives any pinch-zoom font change.
+                val baseCharWidth by currentCharWidth
+                val baseCharHeight by currentCharHeight
                 val touchSlopSquared =
                     viewConfiguration.touchSlop * viewConfiguration.touchSlop
                 var lastMultiTouchTime = 0L
