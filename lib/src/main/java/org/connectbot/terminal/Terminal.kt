@@ -1449,6 +1449,9 @@ internal fun TerminalWithAccessibility(
                                         screenState.snapshot,
                                         screenState.scrollbackPosition,
                                     )
+                                    // Re-sort start/end to reading order once the
+                                    // drag commits (start = top-left-most char).
+                                    selectionManager.endSelection()
 
                                     showMagnifier = false
                                     // Don't auto-show menu again after dragging handle

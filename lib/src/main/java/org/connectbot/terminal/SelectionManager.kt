@@ -289,6 +289,23 @@ internal class SelectionManager {
 
     fun endSelection() {
         isSelecting = false
+        normalizeToReadingOrder()
+    }
+
+    /**
+     * Ensure `start` is the earlier endpoint in reading order (row-major:
+     * top-left-most character). During a drag the range is kept in gesture
+     * order — start = where the finger went down — because the update/drag
+     * logic addresses the moving end by name. Once the gesture commits,
+     * though, the user-facing meaning of the handles is positional: a
+     * left-to-right reader expects the "start" handle on the earlier
+     * character. Called from [endSelection]; harmless when already ordered.
+     */
+    internal fun normalizeToReadingOrder() {
+        val r = selectionRange ?: return
+        if (r.startRow > r.endRow || (r.startRow == r.endRow && r.startCol > r.endCol)) {
+            selectionRange = SelectionRange(r.endRow, r.endCol, r.startRow, r.startCol)
+        }
     }
 
     fun clearSelection() {

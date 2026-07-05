@@ -721,4 +721,42 @@ class SelectionManagerTest {
         range = selectionManager.selectionRange!!
         assertEquals(11, range.endRow) // Still at 11
     }
+
+    @Test
+    fun `backward drag selection is normalized to reading order on end`() {
+        // Drag from (5,10) up-left to (2,3): gesture order has start after end.
+        selectionManager.startSelection(5, 10, 80)
+        selectionManager.updateSelection(2, 3)
+        selectionManager.endSelection()
+
+        val range = selectionManager.selectionRange!!
+        assertEquals(2, range.startRow)
+        assertEquals(3, range.startCol)
+        assertEquals(5, range.endRow)
+        assertEquals(10, range.endCol)
+    }
+
+    @Test
+    fun `backward same-row selection is normalized on end`() {
+        selectionManager.startSelection(4, 20, 80)
+        selectionManager.updateSelection(4, 7)
+        selectionManager.endSelection()
+
+        val range = selectionManager.selectionRange!!
+        assertEquals(7, range.startCol)
+        assertEquals(20, range.endCol)
+    }
+
+    @Test
+    fun `forward selection is unchanged by normalization`() {
+        selectionManager.startSelection(1, 2, 80)
+        selectionManager.updateSelection(3, 4)
+        selectionManager.endSelection()
+
+        val range = selectionManager.selectionRange!!
+        assertEquals(1, range.startRow)
+        assertEquals(2, range.startCol)
+        assertEquals(3, range.endRow)
+        assertEquals(4, range.endCol)
+    }
 }
