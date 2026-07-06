@@ -452,14 +452,20 @@ int Terminal::getCellRun(JNIEnv* env, int row, int col, jobject runObject) {
             // Empty cell
             chars[runLength++] = ' ';
         } else {
-            // Convert UTF-32 to UTF-16 (handle surrogate pairs)
+            // Convert UTF-32 to UTF-16 (handle surrogate pairs). A cell can
+            // emit several combining chars, each up to a 2-jchar surrogate
+            // pair, so the outer `runLength < 256` guard (checked per cell, not
+            // per write) is not enough — bound each write to the buffer size or
+            // a >U+FFFF glyph at the tail would overflow chars[256]. (#24)
             for (int i = 0; i < VTERM_MAX_CHARS_PER_CELL && currentCell.chars[i]; i++) {
                 uint32_t codepoint = currentCell.chars[i];
 
                 if (codepoint <= 0xFFFF) {
+                    if (runLength >= 256) break;
                     chars[runLength++] = (jchar)codepoint;
                 } else {
-                    // Surrogate pair for codepoints > U+FFFF
+                    // Surrogate pair for codepoints > U+FFFF — needs 2 slots.
+                    if (runLength + 2 > 256) break;
                     codepoint -= 0x10000;
                     chars[runLength++] = (jchar)(0xD800 + (codepoint >> 10));
                     chars[runLength++] = (jchar)(0xDC00 + (codepoint & 0x3FF));
@@ -1170,6 +1176,17 @@ Java_org_connectbot_terminal_TerminalNative_nativeWriteInputArray(JNIEnv* env, j
                                                                   jlong ptr, jbyteArray data, jint offset, jint length) {
     auto* term = reinterpret_cast<Terminal*>(ptr);
     jbyte* bytes = env->GetByteArrayElements(data, nullptr);
+    // GetByteArrayElements returns null on OOM (with a pending exception), and
+    // the caller's offset/length are untrusted — validate both against the
+    // array bounds before reading `bytes + offset` for `length`. (#23)
+    if (bytes == nullptr) {
+        return 0;
+    }
+    jsize arrayLen = env->GetArrayLength(data);
+    if (offset < 0 || length < 0 || offset > arrayLen || length > arrayLen - offset) {
+        env->ReleaseByteArrayElements(data, bytes, JNI_ABORT);
+        return 0;
+    }
     int result = term->writeInput(
         reinterpret_cast<const uint8_t*>(bytes + offset), length);
     env->ReleaseByteArrayElements(data, bytes, JNI_ABORT);
