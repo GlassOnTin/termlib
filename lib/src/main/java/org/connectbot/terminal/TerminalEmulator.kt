@@ -150,6 +150,16 @@ sealed interface TerminalEmulator {
     fun getSnapshotLineTexts(): List<String>
 
     /**
+     * True while the emulator is actually rendering the alternate screen
+     * buffer. Distinct from byte-stream scanners (Haven's MouseModeTracker)
+     * that see `ESC[?1049h` go past: when the emulator was built with
+     * `enableAltScreen = false` (profile opt-out, `screen` session manager)
+     * the sequence has no effect and this stays false. Gesture routing must
+     * trust this, not the scanner, when deciding swipe-to-arrow-keys (#255).
+     */
+    fun isAltScreenActive(): Boolean
+
+    /**
      * Build a primitive-typed snapshot of the current terminal state for
      * agent / automation transports. The internal `TerminalSnapshot`
      * (and its `TerminalLine` / `SemanticSegment` collaborators) stay
@@ -349,6 +359,11 @@ internal class TerminalEmulatorImpl(
 
     override fun getSnapshotLineTexts(): List<String> =
         _snapshot.value.lines.map { it.text }
+
+    // Snapshot-derived (not the raw altScreenActive var) so it is safe to
+    // read from the UI thread; at most one frame stale, which is fine for
+    // gesture routing.
+    override fun isAltScreenActive(): Boolean = _snapshot.value.altScreen
 
     // Sequence number for ordering snapshots
     private var sequenceNumber = 0L
