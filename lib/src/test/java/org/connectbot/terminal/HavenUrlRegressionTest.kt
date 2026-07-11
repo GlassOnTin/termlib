@@ -541,4 +541,62 @@ class HavenUrlRegressionTest {
             state.getHyperlinkUrlAt(row = 0, col = 10, autoDetectUrls = true),
         )
     }
+
+    /**
+     * Device-caught over-join (2026-07-11, post-0.1.0 merge verification):
+     * a screen stacking several URL blocks separated by `== header ==`
+     * rows glued EVERYTHING into one mega-URL. `==` passed the blob's
+     * `/#?&=` continuation signal (a pure-punctuation run is decoration,
+     * not a query fragment) and a row with its own `https://` scheme was
+     * accepted as a continuation of the URL above it. Each tapped URL must
+     * resolve to exactly its own block.
+     */
+    @Test
+    fun `spec_adjacent_url_blocks_do_not_glue`() {
+        val state = screenState(
+            60,
+            "== A2 ==",
+            "https://example.com/very/long/path/segments/abcdefghijklmnop", // 60 chars, fills row
+            "tail/xyz",
+            "== B ==",
+            "  ⎿  https://github.com/GlassOnTin/iSpindlePlotter.gi",
+            "     t",
+            "== D ==",
+            "  \"https://gitlab.com/api/v4/projects/fdroid%2Ffdroiddata",
+            "      /merge_requests/36819\" 2>&1",
+            "== end ==",
+            "root@proot:~# ",
+        )
+        assertEquals(
+            "https://example.com/very/long/path/segments/abcdefghijklmnoptail/xyz",
+            state.getHyperlinkUrlAt(row = 1, col = 10, autoDetectUrls = true),
+        )
+        assertEquals(
+            "https://github.com/GlassOnTin/iSpindlePlotter.git",
+            state.getHyperlinkUrlAt(row = 4, col = 20, autoDetectUrls = true),
+        )
+        assertEquals(
+            "https://gitlab.com/api/v4/projects/fdroid%2Ffdroiddata/merge_requests/36819",
+            state.getHyperlinkUrlAt(row = 7, col = 20, autoDetectUrls = true),
+        )
+    }
+
+    @Test
+    fun `spec_full_width_url_row_does_not_glue_to_url_below`() {
+        // Margin-wrap acceptance must not bridge into a row that carries
+        // its own scheme — two independent URLs printed on adjacent rows.
+        val state = screenState(
+            43,
+            "https://example.com/very/long/path/xxxxyyyy", // 43 chars, fills row
+            "https://other.example.org/second",
+        )
+        assertEquals(
+            "https://example.com/very/long/path/xxxxyyyy",
+            state.getHyperlinkUrlAt(row = 0, col = 10, autoDetectUrls = true),
+        )
+        assertEquals(
+            "https://other.example.org/second",
+            state.getHyperlinkUrlAt(row = 1, col = 10, autoDetectUrls = true),
+        )
+    }
 }

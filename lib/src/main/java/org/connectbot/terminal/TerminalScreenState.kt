@@ -315,6 +315,11 @@ internal class TerminalScreenState(
         val trimmedRun = run.trimDetectedUrl()
         if (trimmedRun.isEmpty()) return null
 
+        // A row carrying its own URL scheme is a new URL, never a
+        // continuation — two independent URLs printed on adjacent rows must
+        // not be joined even when the first row runs to the right margin.
+        if (run.contains("://")) return null
+
         val prevEndsWithDelimiter = previousEndCol > 0 && previousText[previousEndCol - 1] in "/?&=#"
         val nextStartsWithQueryOrFragment = run.isNotEmpty() && run[0] in "?&#"
         val previousRun = previousText.substring(0, previousEndCol)

@@ -267,6 +267,15 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
             firstUrlSafeColAfterPrefix(curRow) ?: return null
         }
 
+        // A row that carries its own URL scheme is a NEW anchor, never a
+        // continuation — without this, a screen listing several URLs on
+        // adjacent rows glues them into one mega-URL (the regex bridges
+        // the rows because `=`/`#` are URL-safe characters). Checked before
+        // the margin-wrap acceptance so a full-width URL row doesn't glue
+        // to an unrelated URL printed directly below it.
+        val curText = rowAsString(curRow)
+        if (curText.contains("://")) return null
+
         // Margin wrap — continuation accepted with no structural-char
         // requirement.
         if (prevUrlEnd == cols - 1) return curStart
@@ -278,13 +287,19 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
         // natural prose (which essentially never contains these runs of
         // URL-safe glyphs). Required because wrap targets like
         // `.../issues/106#issuecomment-1234` land their fragment on the
-        // continuation row with no `/` of its own.
+        // continuation row with no `/` of its own. The run must also carry
+        // at least one alphanumeric: a run of pure punctuation (`==`, `--`
+        // markdown underlines, separator rows) is decoration, not a URL
+        // fragment, and accepting it chains unrelated rows together.
         var sawStructural = false
+        var sawAlnum = false
         var runEnd = curStart
         while (runEnd < cols && cellChar[curRow][runEnd].isBlobUrlSafe()) {
             if (cellChar[curRow][runEnd] in "/#?&=") sawStructural = true
+            if (cellChar[curRow][runEnd].isLetterOrDigit()) sawAlnum = true
             runEnd++
         }
+        if (sawStructural && !sawAlnum) sawStructural = false
         if (!sawStructural) {
             // Fallback for slash-less wrap tails: a short URL-safe run alone on
             // an otherwise-blank line is the shape of a hanging-indent wrap
