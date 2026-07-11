@@ -25,10 +25,10 @@ import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
-import androidx.compose.ui.input.key.KeyEvent as ComposeKeyEvent
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import androidx.compose.ui.input.key.KeyEvent as ComposeKeyEvent
 
 /**
  * A minimal invisible View that provides proper IME input handling for terminal emulation.
@@ -215,8 +215,11 @@ internal class ImeInputView(
         // when the user has NOT explicitly opted into Standard keyboard —
         // in Standard mode the user has asked for full IME features and
         // we shouldn't suppress them.
-        val noLearning = if (allowStandardKeyboard) 0
-        else EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+        val noLearning = if (allowStandardKeyboard) {
+            0
+        } else {
+            EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+        }
         // NO_EXTRACT_UI suppresses the IME's fullscreen-editor UI in
         // landscape. For Secure/Compose modes this is right — we render
         // our own text. But in Standard keyboard mode the user has
@@ -224,13 +227,16 @@ internal class ImeInputView(
         // (Gboard included) interpret NO_EXTRACT_UI as "this field
         // doesn't want rich editing" and suppress composition-based
         // autocorrect.
-        val noExtractUi = if (allowStandardKeyboard) 0
-        else EditorInfo.IME_FLAG_NO_EXTRACT_UI
+        val noExtractUi = if (allowStandardKeyboard) {
+            0
+        } else {
+            EditorInfo.IME_FLAG_NO_EXTRACT_UI
+        }
         outAttrs.imeOptions = outAttrs.imeOptions or
-                noExtractUi or
-                EditorInfo.IME_FLAG_NO_ENTER_ACTION or
-                noLearning or
-                EditorInfo.IME_ACTION_NONE
+            noExtractUi or
+            EditorInfo.IME_FLAG_NO_ENTER_ACTION or
+            noLearning or
+            EditorInfo.IME_ACTION_NONE
 
         if (isComposeModeActive) {
             // Compose mode: allow voice input and IME suggestions.
@@ -252,7 +258,7 @@ internal class ImeInputView(
             // replacement protocol (setComposingRegion + commitText).
             // See #99.
             outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT or
-                    EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT
+                EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT
         } else {
             // Terminal mode (default): pick flags that keep the user's typing
             // verbatim and don't let the IME rewrite commands.
@@ -286,15 +292,18 @@ internal class ImeInputView(
             val needsAutoCorrectGate = isAutoCorrectGatedIme(context)
             outAttrs.inputType = if (needsAutoCorrectGate) {
                 EditorInfo.TYPE_CLASS_TEXT or
-                        EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
-                        EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT
+                    EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
+                    EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT
             } else {
                 EditorInfo.TYPE_CLASS_TEXT or
-                        EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
-                        EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                    EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
+                    EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             }
-            Log.d(TAG, "Secure mode flags: gated=$needsAutoCorrectGate" +
-                " inputType=0x${outAttrs.inputType.toString(16)}")
+            Log.d(
+                TAG,
+                "Secure mode flags: gated=$needsAutoCorrectGate" +
+                    " inputType=0x${outAttrs.inputType.toString(16)}",
+            )
         }
 
         // fullEditor=true gives BaseInputConnection a real Editable, which
@@ -305,11 +314,14 @@ internal class ImeInputView(
         // default Secure mode where NO_SUGGESTIONS is already set and we
         // don't want the editable to accumulate shell input.
         val fullEditor = isComposeModeActive || allowStandardKeyboard
-        Log.d(TAG, "onCreateInputConnection: mode=" +
-            (if (allowStandardKeyboard) "STANDARD" else "SECURE") +
-            " compose=$isComposeModeActive fullEditor=$fullEditor" +
-            " inputType=0x${outAttrs.inputType.toString(16)}" +
-            " imeOptions=0x${outAttrs.imeOptions.toString(16)}")
+        Log.d(
+            TAG,
+            "onCreateInputConnection: mode=" +
+                (if (allowStandardKeyboard) "STANDARD" else "SECURE") +
+                " compose=$isComposeModeActive fullEditor=$fullEditor" +
+                " inputType=0x${outAttrs.inputType.toString(16)}" +
+                " imeOptions=0x${outAttrs.imeOptions.toString(16)}",
+        )
         return TerminalInputConnection(this, fullEditor).also { activeConnection = it }
     }
 
@@ -426,8 +438,11 @@ internal class ImeInputView(
 
         override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
             val newText = text?.toString() ?: ""
-            Log.d(TAG, "setComposingText(text=${text?.toString()?.take(40)?.let { "\"$it\"" } ?: "null"}" +
-                ", newCursorPos=$newCursorPosition) fullEditor=$fullEditor")
+            Log.d(
+                TAG,
+                "setComposingText(text=${text?.toString()?.take(40)?.let { "\"$it\"" } ?: "null"}" +
+                    ", newCursorPos=$newCursorPosition) fullEditor=$fullEditor",
+            )
 
             if (!fullEditor) {
                 // Secure mode: eager-commit each delta immediately so sticky
@@ -532,8 +547,11 @@ internal class ImeInputView(
         }
 
         override fun finishComposingText(): Boolean {
-            Log.d(TAG, "finishComposingText() composing.len=${composingText.length}" +
-                " pendingReplacement=$pendingReplacementLength fullEditor=$fullEditor")
+            Log.d(
+                TAG,
+                "finishComposingText() composing.len=${composingText.length}" +
+                    " pendingReplacement=$pendingReplacementLength fullEditor=$fullEditor",
+            )
             super.finishComposingText()
 
             if (pendingReplacementLength > 0 && composingText.isNotEmpty()) {
@@ -579,8 +597,11 @@ internal class ImeInputView(
         }
 
         override fun deleteSurroundingText(leftLength: Int, rightLength: Int): Boolean {
-            Log.d(TAG, "deleteSurroundingText(left=$leftLength, right=$rightLength)" +
-                " composing.len=${composingText.length}")
+            Log.d(
+                TAG,
+                "deleteSurroundingText(left=$leftLength, right=$rightLength)" +
+                    " composing.len=${composingText.length}",
+            )
             // Handle backspace by sending DEL key events.
             // When IME sends delete, it often sends (0, 0) or (1, 0) for backspace.
             if (rightLength == 0 && leftLength == 0) {
@@ -643,9 +664,12 @@ internal class ImeInputView(
             return when (event.keyCode) {
                 in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z ->
                     'a'.code + (event.keyCode - KeyEvent.KEYCODE_A)
+
                 in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 ->
                     '0'.code + (event.keyCode - KeyEvent.KEYCODE_0)
+
                 KeyEvent.KEYCODE_SPACE -> ' '.code
+
                 else -> 0
             }
         }
@@ -721,9 +745,12 @@ internal class ImeInputView(
         }
 
         override fun sendKeyEvent(event: KeyEvent): Boolean {
-            Log.d(TAG, "sendKeyEvent(action=${event.action} keyCode=${event.keyCode}" +
-                " unicode=${event.unicodeChar}) suppressed=$suppressKeyEvents" +
-                " pendingSuppress=${pendingSuppressChars.size}")
+            Log.d(
+                TAG,
+                "sendKeyEvent(action=${event.action} keyCode=${event.keyCode}" +
+                    " unicode=${event.unicodeChar}) suppressed=$suppressKeyEvents" +
+                    " pendingSuppress=${pendingSuppressChars.size}",
+            )
             if (suppressKeyEvents) return true
 
             // Consume the deferred ACTION_DOWN that Samsung Keyboard fires
@@ -801,8 +828,11 @@ internal class ImeInputView(
             newCursorPosition: Int,
             textAttribute: android.view.inputmethod.TextAttribute?,
         ): Boolean {
-            Log.d(TAG, "replaceText(start=$start, end=$end, text=\"${text.toString().take(40)}\"" +
-                ", newCursorPos=$newCursorPosition)")
+            Log.d(
+                TAG,
+                "replaceText(start=$start, end=$end, text=\"${text.toString().take(40)}\"" +
+                    ", newCursorPos=$newCursorPosition)",
+            )
             val ed = editable
             val cursorBefore = ed?.let { Selection.getSelectionStart(it) } ?: -1
             val result = super.replaceText(start, end, text, newCursorPosition, textAttribute)
@@ -824,8 +854,11 @@ internal class ImeInputView(
 
         override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
             val committedText = text?.toString() ?: ""
-            Log.d(TAG, "commitText(\"${committedText.take(40)}\", newCursorPos=$newCursorPosition)" +
-                " pendingReplacement=$pendingReplacementLength")
+            Log.d(
+                TAG,
+                "commitText(\"${committedText.take(40)}\", newCursorPos=$newCursorPosition)" +
+                    " pendingReplacement=$pendingReplacementLength",
+            )
             // super.commitText() updates the Editable state (needed for IME sync)
             // but also dispatches key events via sendKeyEvent(). Suppress those
             // to avoid double input — we send the text ourselves via sendTextInput().
@@ -1052,10 +1085,10 @@ internal class ImeInputView(
         val noLearning = if (flags.noPersonalizedLearning) EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING else 0
         val noExtractUi = if (flags.noExtractUi) EditorInfo.IME_FLAG_NO_EXTRACT_UI else 0
         outAttrs.imeOptions = outAttrs.imeOptions or
-                noExtractUi or
-                EditorInfo.IME_FLAG_NO_ENTER_ACTION or
-                noLearning or
-                EditorInfo.IME_ACTION_NONE
+            noExtractUi or
+            EditorInfo.IME_FLAG_NO_ENTER_ACTION or
+            noLearning or
+            EditorInfo.IME_ACTION_NONE
 
         var inputType = EditorInfo.TYPE_CLASS_TEXT
         if (flags.visiblePassword) inputType = inputType or EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
@@ -1065,11 +1098,14 @@ internal class ImeInputView(
         outAttrs.initialSelStart = 0
         outAttrs.initialSelEnd = 0
 
-        Log.d(TAG, "onCreateInputConnection: CUSTOM" +
-            " inputType=0x${outAttrs.inputType.toString(16)}" +
-            " imeOptions=0x${outAttrs.imeOptions.toString(16)}" +
-            " fullEditor=${flags.fullEditor}" +
-            " flags=$flags")
+        Log.d(
+            TAG,
+            "onCreateInputConnection: CUSTOM" +
+                " inputType=0x${outAttrs.inputType.toString(16)}" +
+                " imeOptions=0x${outAttrs.imeOptions.toString(16)}" +
+                " fullEditor=${flags.fullEditor}" +
+                " flags=$flags",
+        )
         return TerminalInputConnection(this, flags.fullEditor).also { activeConnection = it }
     }
 
@@ -1107,7 +1143,9 @@ internal class ImeInputView(
         fun shouldResetImeBufferOnKey(keyCode: Int): Boolean = when (keyCode) {
             KeyEvent.KEYCODE_ENTER,
             KeyEvent.KEYCODE_NUMPAD_ENTER,
-            KeyEvent.KEYCODE_ESCAPE -> true
+            KeyEvent.KEYCODE_ESCAPE,
+            -> true
+
             else -> false
         }
 

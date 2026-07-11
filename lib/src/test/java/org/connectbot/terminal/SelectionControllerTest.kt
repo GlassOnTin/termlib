@@ -108,9 +108,7 @@ class SelectionControllerTest {
                 selectionManager.updateSelectionEnd(row, col)
             }
 
-            override fun getSelectionRange(): SelectionRange? {
-                return selectionManager.selectionRange
-            }
+            override fun getSelectionRange(): SelectionRange? = selectionManager.selectionRange
         }
     }
 

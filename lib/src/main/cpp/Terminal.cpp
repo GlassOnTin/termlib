@@ -92,6 +92,10 @@ Terminal::Terminal(JNIEnv* env, jobject callbacks, int rows, int cols, bool enab
     if (!mPopScrollbackMethod) {
         LOGE("Failed to find popScrollbackLine method");
     }
+    mClearScrollbackMethod = env->GetMethodID(callbacksClass, "clearScrollback", "()I");
+    if (!mClearScrollbackMethod) {
+        LOGE("Failed to find clearScrollback method");
+    }
     mKeyboardInputMethod = env->GetMethodID(callbacksClass, "onKeyboardInput", "([B)I");
     if (!mKeyboardInputMethod) {
         LOGE("Failed to find onKeyboardInput method");
@@ -190,7 +194,10 @@ Terminal::Terminal(JNIEnv* env, jobject callbacks, int rows, int cols, bool enab
         vterm_screen_enable_altscreen(mVts, 1);
     }
 
-    // Initialize callback structure as member variable so it doesn't go out of scope
+    // Initialize callback structure as member variable so it doesn't go out of scope.
+    // These callbacks run while mLock may be held by the native entrypoint that
+    // triggered libvterm. Callback implementations must not synchronously call
+    // back into Terminal methods; post/defer work that needs native state.
     mScreenCallbacks = {
         .damage = termDamage,
         .moverect = termMoverect,
@@ -200,11 +207,12 @@ Terminal::Terminal(JNIEnv* env, jobject callbacks, int rows, int cols, bool enab
         .resize = nullptr,  // We handle resize explicitly
         .sb_pushline = termSbPushline,
         .sb_popline = termSbPopline,
-        .sb_clear = nullptr  // Not needed
+        .sb_clear = termSbClear
     };
     vterm_screen_set_callbacks(mVts, &mScreenCallbacks, this);
 
-    // Set up OSC fallback handlers for shell integration
+    // Set up OSC fallback handlers for shell integration. These follow the same
+    // no-synchronous-reentry rule as screen callbacks above.
     VTermState* state = vterm_obtain_state(mVt);
     VTermStateFallbacks fallbacks = {
         .control = nullptr,
@@ -218,7 +226,8 @@ Terminal::Terminal(JNIEnv* env, jobject callbacks, int rows, int cols, bool enab
     mStateFallbacks = fallbacks;
     vterm_state_set_unrecognised_fallbacks(state, &mStateFallbacks, this);
 
-    // Set up selection callbacks for OSC 52 clipboard support
+    // Set up selection callbacks for OSC 52 clipboard support. These follow the
+    // same no-synchronous-reentry rule as screen callbacks above.
     // Note: libvterm handles base64 decoding internally
     mSelectionCallbacks = {
         .set = termSelectionSet,
@@ -239,7 +248,7 @@ Terminal::Terminal(JNIEnv* env, jobject callbacks, int rows, int cols, bool enab
 Terminal::~Terminal() {
     LOGD("Terminal destructor");
 
-    std::lock_guard<std::recursive_mutex> lock(mLock);
+    std::scoped_lock lock(mLock);
 
     if (mVt) {
         vterm_free(mVt);
@@ -272,7 +281,7 @@ Terminal::~Terminal() {
 
 // Input handling - KEY METHOD
 int Terminal::writeInput(const uint8_t* data, size_t length) {
-    std::lock_guard<std::recursive_mutex> lock(mLock);
+    std::scoped_lock lock(mLock);
 
     if (!mVt) {
         LOGE("writeInput: VTerm not initialized");
@@ -290,7 +299,7 @@ int Terminal::writeInput(const uint8_t* data, size_t length) {
 
 // Resize
 int Terminal::resize(int rows, int cols) {
-    std::lock_guard<std::recursive_mutex> lock(mLock);
+    std::scoped_lock lock(mLock);
 
     mRows = rows;
     mCols = cols;
@@ -305,7 +314,7 @@ int Terminal::resize(int rows, int cols) {
 
 // Color configuration
 int Terminal::setPaletteColors(const uint32_t* colors, int count) {
-    std::lock_guard<std::recursive_mutex> lock(mLock);
+    std::scoped_lock lock(mLock);
 
     if (!mVt) {
         LOGE("setPaletteColors: VTerm not initialized");
@@ -337,7 +346,7 @@ int Terminal::setPaletteColors(const uint32_t* colors, int count) {
 }
 
 int Terminal::setBoldHighbright(int enabled) {
-    std::lock_guard<std::recursive_mutex> lock(mLock);
+    std::scoped_lock lock(mLock);
 
     if (!mVt) {
         LOGE("setBoldHighbright: VTerm not initialized");
@@ -355,7 +364,7 @@ int Terminal::setBoldHighbright(int enabled) {
 }
 
 int Terminal::setDefaultColors(uint32_t fgColor, uint32_t bgColor) {
-    std::lock_guard<std::recursive_mutex> lock(mLock);
+    std::scoped_lock lock(mLock);
 
     if (!mVt) {
         LOGE("setDefaultColors: VTerm not initialized");
@@ -389,7 +398,7 @@ int Terminal::setDefaultColors(uint32_t fgColor, uint32_t bgColor) {
 
 // Keyboard input handlers
 bool Terminal::dispatchKey(int modifiers, int key) {
-    std::lock_guard<std::recursive_mutex> lock(mLock);
+    std::scoped_lock lock(mLock);
 
     if (!mVt) {
         return false;
@@ -405,7 +414,7 @@ bool Terminal::dispatchKey(int modifiers, int key) {
 }
 
 bool Terminal::dispatchCharacter(int modifiers, int codepoint) {
-    std::lock_guard<std::recursive_mutex> lock(mLock);
+    std::scoped_lock lock(mLock);
 
     if (!mVt) {
         return false;
@@ -422,7 +431,7 @@ bool Terminal::dispatchCharacter(int modifiers, int codepoint) {
 
 // Cell run retrieval
 int Terminal::getCellRun(JNIEnv* env, int row, int col, jobject runObject) {
-    std::lock_guard<std::recursive_mutex> lock(mLock);
+    std::scoped_lock lock(mLock);
 
     if (!mVts || row < 0 || row >= mRows || col < 0 || col >= mCols) {
         return 0;
@@ -581,6 +590,12 @@ int Terminal::termSbPushline(int cols, const VTermScreenCell* cells, void* user)
 int Terminal::termSbPopline(int cols, VTermScreenCell* cells, void* user) {
     auto* term = static_cast<Terminal*>(user);
     return term->invokePopScrollbackLine(cols, cells);
+}
+
+int Terminal::termSbClear(void* user) {
+    auto* term = static_cast<Terminal*>(user);
+    term->invokeClearScrollback();
+    return 1;
 }
 
 void Terminal::termOutput(const char* s, size_t len, void* user) {
@@ -1027,6 +1042,20 @@ int Terminal::invokePopScrollbackLine(int cols, VTermScreenCell* cells) {
     return 1;
 }
 
+void Terminal::invokeClearScrollback() {
+    if (!mClearScrollbackMethod) {
+        return;
+    }
+
+    JNIEnv* env;
+    if (mJavaVM->GetEnv((void**)&env, JNI_VERSION_1_6) != JNI_OK) {
+        return;
+    }
+
+    env->CallIntMethod(mCallbacks, mClearScrollbackMethod);
+    JNI_CHECK_EXCEPTION(env);
+}
+
 void Terminal::invokeKeyboardOutput(const char* data, size_t len) {
     if (!mKeyboardInputMethod) {
         return;
@@ -1074,7 +1103,7 @@ int Terminal::invokeOscSequence(int command, const std::string& payload, int cur
 
 // Line info retrieval
 bool Terminal::getLineContinuation(int row) {
-    std::lock_guard<std::recursive_mutex> lock(mLock);
+    std::scoped_lock lock(mLock);
 
     if (!mVt || row < 0 || row >= mRows) {
         return false;

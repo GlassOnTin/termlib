@@ -17,8 +17,8 @@
 package org.connectbot.terminal
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,6 +42,17 @@ import androidx.compose.runtime.setValue
 internal class TerminalScreenState(
     initialSnapshot: TerminalSnapshot,
 ) {
+    private data class DetectedUrl(
+        val row: Int,
+        val range: IntRange,
+        val url: String,
+    )
+
+    private var cachedSequenceNumber = -1L
+    private var cachedScrollbackPosition = -1
+    private var cachedAutoDetect = false
+    private var cachedUrlGrid = Array(0) { arrayOfNulls<String>(0) }
+
     /**
      * The current immutable terminal snapshot.
      * Updated via updateSnapshot() to preserve scroll position across snapshot changes.
@@ -110,128 +121,225 @@ internal class TerminalScreenState(
     }
 
     /**
-     * Get the hyperlink URL at a visible row/col, handling URLs that wrap
-     * across terminal-width boundaries.
+     * Get the hyperlink URL at a visible row/col.
      *
-     * A multi-line URL is reconstructed by walking outward from [row] only
-     * through rows that are *genuine* URL continuations of their neighbour:
-     * the previous row ends with a URL-safe character (after stripping the
-     * terminal-width padding) AND the next row begins with a URL-safe
-     * character **at column 0** — no leading whitespace allowed. That last
-     * constraint is what distinguishes a wrapped URL ("…/issu" + "es/78")
-     * from a URL followed by a new line of indented prose ("…/issues/78"
-     * + "  i think…"): a real wrap has no room for leading indentation.
-     *
-     * Within a single row, whitespace is always preserved, so prose after
-     * a URL on the same row is not merged into the URL by the regex.
-     *
-     * Fixes the "ithinktheis..." whitespace-gobbling regression reported
-     * during #78 review.
+     * OSC 8 semantic hyperlinks always win. When [autoDetectUrls] is enabled,
+     * plain-text URL detection also handles URLs split across adjacent visual
+     * rows by terminal wrapping or tool-added continuation prefixes.
      */
-    fun getHyperlinkUrlAt(row: Int, col: Int): String? {
-        val line = getVisibleLine(row)
+    fun getHyperlinkUrlAt(row: Int, col: Int, autoDetectUrls: Boolean = false): String? {
+        if (row !in 0 until snapshot.rows || col !in 0 until snapshot.cols) return null
 
-        // OSC 8 segments always take priority
+        val line = getVisibleLine(row)
         val osc8 = line.semanticSegments.firstOrNull {
             it.semanticType == SemanticType.HYPERLINK && it.contains(col)
         }?.metadata
         if (osc8 != null) return osc8
 
-        // 2D blob detector runs first — it handles structural-column-bounded
-        // URLs (markdown tables, box-drawn panels) and continuation rows with
-        // formatting prefixes (⎿, │, leading indentation). The blob may
-        // extend a URL that the single-line match would truncate, so it must
-        // get first look. Falls through to the legacy walker / single-line
-        // fallback below if the blob approach can't anchor a URL at the tap.
-        val blobUrl = UrlBlobDetector(this).detect(row, col)
-        if (blobUrl != null) return blobUrl
+        if (!autoDetectUrls) return null
 
-        // Single-line fast path: if a regex match doesn't touch either edge
-        // of the trimmed line text, no continuation logic is needed.
-        val singleHit = line.autoDetectedUrls.firstOrNull { col >= it.first && col < it.second }
-        if (singleHit != null) {
-            val trimmedLen = line.text.trimEnd().length
-            if (singleHit.second < trimmedLen && singleHit.first > 0) return singleHit.third
+        if (snapshot.sequenceNumber != cachedSequenceNumber ||
+            scrollbackPosition != cachedScrollbackPosition ||
+            autoDetectUrls != cachedAutoDetect
+        ) {
+            rebuildUrlCache(autoDetect = true)
         }
 
-        // Walk outward from `row` to find the tight bounds of the URL
-        // continuation group. A row `r+1` is a continuation of row `r` iff
-        // row `r` was near-completely filled (no room for more content on
-        // the same row) and either:
-        //   - row r+1's first char at col 0 is URL-safe, OR
-        //   - row r+1 is indented with whitespace followed by a URL-safe
-        //     char AND row r was filled exactly to the right margin.
+        val cached = if (row in cachedUrlGrid.indices && col in cachedUrlGrid[row].indices) {
+            cachedUrlGrid[row][col]
+        } else {
+            null
+        }
+
+        // Haven fallback: the grid's continuation heuristics require a filled
+        // or soft-wrapped previous row, which misses CLI-hard-wrapped URLs
+        // (a tool wraps at its own width < terminal cols and prints the
+        // continuation as a separate short line, often behind a `⎿`/`│`
+        // decoration or inside a markdown-table column). The 2D blob
+        // detector handles those; it is anchor-gated on an explicit scheme
+        // so it cannot invent URLs from prose. Tap-time only — never bulk.
         //
-        // The "near-completely filled" test is what distinguishes a wrapped
-        // URL from a URL on a short row followed by an unrelated line of
-        // prose. If row r had visible slack, the CLI would have continued
-        // the URL on the same row rather than breaking it.
-        //
-        // The indented-with-leading-whitespace case handles markdown bullet
-        // wraps where the CLI renderer inserts an indent on the continuation
-        // line to align with the bullet text: only permitted when row r has
-        // zero slack, since an indented new paragraph after unused trailing
-        // cells is definitely a fresh logical line, not a URL continuation.
-        fun isContinuation(prevRow: Int, curRow: Int): Boolean {
-            if (prevRow < 0 || curRow >= snapshot.rows) return false
-            val prevLine = getVisibleLine(prevRow)
-            val prevText = prevLine.text
-            val prevTrimmed = prevText.trimEnd()
-            if (prevTrimmed.isEmpty() || !prevTrimmed.last().isUrlSafe()) return false
-
-            // Slack = unused cells at the right margin of the previous row.
-            // A genuine forced wrap leaves ~0 slack; the CLI-wrap-at-column-
-            // boundary case leaves 0-2 depending on exact alignment.
-            val slack = prevText.length - prevTrimmed.length
-            val terminalWrapped = prevLine.softWrapped
-            if (slack > CONTINUATION_SLACK_TOLERANCE && !terminalWrapped) return false
-
-            val curText = getVisibleLine(curRow).text
-            if (curText.isEmpty()) return false
-            val firstCh = curText[0]
-            if (firstCh.isUrlSafe()) return true
-            // Indented continuation allowed only when prev row was filled
-            // exactly to the right margin — anything less and the indent
-            // almost certainly marks a new logical paragraph.
-            if (slack == 0 || terminalWrapped) {
-                val firstNonWs = curText.firstOrNull { !it.isWhitespace() } ?: return false
-                return firstNonWs.isUrlSafe()
+        // A grid hit can itself be a truncated single-row match, but only
+        // when nothing except whitespace or frame/decoration characters
+        // (│, ⎿, table borders …) follows it on the row — a URL followed by
+        // real prose on the same row cannot be a wrap, so the grid answer
+        // stands and the blob may not glue it to the next row's (possibly
+        // unrelated) content.
+        // "Follows it" means up to the next frame char: in a table row like
+        // `| https://… | col3 |` the prose after the frame belongs to another
+        // cell, and the URL still fills its own cell to the boundary.
+        val truncatable = cached == null || run {
+            val trimmed = line.text.trimEnd()
+            line.autoDetectedUrls.any { hit ->
+                col >= hit.first && col < hit.second &&
+                    trimmed.drop(hit.second)
+                        .takeWhile { !it.isUrlPrefixDecoration() }
+                        .all { it.isWhitespace() }
             }
-            return false
         }
+        if (!truncatable) return cached
 
-        var startRow = row
-        while (startRow > 0 && isContinuation(startRow - 1, startRow)) startRow--
-        var endRow = row
-        while (endRow < snapshot.rows - 1 && isContinuation(endRow, endRow + 1)) endRow++
+        val blob = UrlBlobDetector(this).detect(row, col)?.trimDetectedUrl()?.takeIf { it.isNotEmpty() }
+        return when {
+            cached == null -> blob
+            blob != null && blob.length > cached.length -> blob
+            else -> cached
+        }
+    }
 
-        // Build the joined text. Within each row, we trim only the trailing
-        // terminal-width padding — the internal whitespace of the row is
-        // preserved so prose word separators remain intact. Rows in the
-        // continuation group are concatenated with no separator (that IS
-        // the wrap behaviour we want to reverse). Continuation rows (every
-        // row after startRow) additionally have their leading whitespace
-        // stripped to handle markdown-style bullet-indented wraps, where a
-        // CLI renderer breaks a URL and indents the continuation line.
-        val joined = StringBuilder()
-        var tapOffsetInJoined = 0
-        for (r in startRow..endRow) {
-            val rowText = getVisibleLine(r).text.trimEnd()
-            val appendText = if (r > startRow) rowText.trimStart() else rowText
-            val strippedLeading = if (r > startRow) rowText.length - appendText.length else 0
-            if (r == row) {
-                val adjustedCol = (col - strippedLeading).coerceAtLeast(0)
-                tapOffsetInJoined = joined.length + adjustedCol
+    private fun rebuildUrlCache(autoDetect: Boolean) {
+        cachedSequenceNumber = snapshot.sequenceNumber
+        cachedScrollbackPosition = scrollbackPosition
+        cachedAutoDetect = autoDetect
+
+        val numRows = snapshot.rows
+        val cols = snapshot.cols
+        if (cachedUrlGrid.size != numRows || (numRows > 0 && cachedUrlGrid[0].size != cols)) {
+            cachedUrlGrid = Array(numRows) { arrayOfNulls<String>(cols) }
+        } else {
+            for (r in 0 until numRows) {
+                cachedUrlGrid[r].fill(null)
             }
-            joined.append(appendText)
         }
 
-        // If the URL contains the tap point in the joined text, return it.
-        // Otherwise fall back to the single-line hit (if any).
-        val match = TerminalLine.URL_REGEX.findAll(joined).firstOrNull { m ->
-            tapOffsetInJoined in m.range.first..m.range.last
+        val list = mutableListOf<DetectedUrl>()
+        if (!autoDetect) {
+            return
         }
-        return match?.value ?: singleHit?.third
+
+        val visited = Array(numRows) { BooleanArray(cols) }
+
+        for (row in 0 until numRows) {
+            val line = getVisibleLine(row)
+
+            for ((anchorCol, _, _) in line.autoDetectedUrls) {
+                if (anchorCol !in 0 until cols) continue
+                if (visited[row][anchorCol]) continue
+
+                val spans = buildWrappedUrlSpans(row, anchorCol)
+                if (spans.isNotEmpty()) {
+                    val joined = StringBuilder()
+                    for ((spanRow, span) in spans.toSortedMap()) {
+                        joined.append(readUrlSpan(spanRow, span))
+                        for (c in span) {
+                            if (spanRow in 0 until numRows && c in 0 until cols) {
+                                visited[spanRow][c] = true
+                            }
+                        }
+                    }
+
+                    val trimmedUrl = TerminalLine.URL_REGEX.findAll(joined).firstOrNull()?.value?.trimDetectedUrl()
+                    if (!trimmedUrl.isNullOrEmpty()) {
+                        mapUrlToSpans(spans, trimmedUrl, list)
+                    }
+                }
+            }
+        }
+
+        for (detected in list) {
+            if (detected.row in 0 until numRows) {
+                for (col in detected.range) {
+                    if (col in 0 until cols) {
+                        cachedUrlGrid[detected.row][col] = detected.url
+                    }
+                }
+            }
+        }
+    }
+
+    private fun mapUrlToSpans(spans: Map<Int, IntRange>, trimmedUrl: String, list: MutableList<DetectedUrl>) {
+        var remainingLength = trimmedUrl.length
+        for ((spanRow, span) in spans.toSortedMap()) {
+            if (remainingLength <= 0) break
+            val spanLength = span.last - span.first + 1
+            val takeLength = minOf(remainingLength, spanLength)
+            if (takeLength > 0) {
+                val range = span.first until (span.first + takeLength)
+                list.add(DetectedUrl(spanRow, range, trimmedUrl))
+            }
+            remainingLength -= takeLength
+        }
+    }
+
+    private fun buildWrappedUrlSpans(anchorRow: Int, anchorCol: Int): Map<Int, IntRange> {
+        val spans = linkedMapOf<Int, IntRange>()
+        var row = anchorRow
+        var startCol = anchorCol
+
+        while (row < snapshot.rows && (row - anchorRow) < MAX_URL_CONTINUATION_ROWS) {
+            val text = getVisibleLine(row).columnText
+            if (startCol !in text.indices || !text[startCol].isUrlSafe()) break
+
+            var endCol = startCol
+            while (endCol < text.length && text[endCol].isUrlSafe()) {
+                endCol++
+            }
+
+            val nextStart = continuationStart(row, endCol)
+            if (nextStart != null) {
+                spans[row] = startCol until endCol
+                row++
+                startCol = nextStart
+            } else {
+                val runStr = text.substring(startCol, endCol)
+                val trimmed = runStr.trimDetectedUrl()
+                if (trimmed.isNotEmpty()) {
+                    spans[row] = startCol until (startCol + trimmed.length)
+                }
+                break
+            }
+        }
+
+        return spans
+    }
+
+    private fun continuationStart(previousRow: Int, previousEndCol: Int): Int? {
+        if (previousRow + 1 >= snapshot.rows) return null
+
+        val previousLine = getVisibleLine(previousRow)
+        val previousText = previousLine.columnText
+
+        val previousTrimmedEnd = previousText.indexOfLast { it != '\u0000' && !it.isWhitespace() } + 1
+        if (previousTrimmedEnd <= 0 || previousEndCol < previousTrimmedEnd) return null
+
+        val rowFilled = previousEndCol >= snapshot.cols || previousLine.softWrapped
+        val nextRow = previousRow + 1
+        val nextText = getVisibleLine(nextRow).columnText
+        val start = firstUrlSafeAfterPrefix(nextText) ?: return null
+
+        var end = start
+        while (end < nextText.length && nextText[end].isUrlSafe()) {
+            end++
+        }
+        val run = nextText.substring(start, end)
+        val trimmedRun = run.trimDetectedUrl()
+        if (trimmedRun.isEmpty()) return null
+
+        val prevEndsWithDelimiter = previousEndCol > 0 && previousText[previousEndCol - 1] in "/?&=#"
+        val nextStartsWithQueryOrFragment = run.isNotEmpty() && run[0] in "?&#"
+        val previousRun = previousText.substring(0, previousEndCol)
+        val previousWouldTrim = previousRun.trimDetectedUrl().length < previousRun.length
+        val rowFilledContinuation = rowFilled &&
+            (!previousWouldTrim || prevEndsWithDelimiter || nextStartsWithQueryOrFragment)
+        val continues = rowFilledContinuation || prevEndsWithDelimiter || nextStartsWithQueryOrFragment
+
+        return if (continues) start else null
+    }
+
+    private fun firstUrlSafeAfterPrefix(text: String): Int? {
+        for (index in text.indices) {
+            val ch = text[index]
+            if (ch == '\u0000' || ch.isWhitespace()) continue
+            if (ch.isUrlPrefixDecoration()) continue
+            return if (ch.isUrlSafe()) index else null
+        }
+        return null
+    }
+
+    private fun readUrlSpan(row: Int, span: IntRange): String {
+        val text = getVisibleLine(row).columnText
+        val end = (span.last + 1).coerceAtMost(text.length)
+        return if (span.first < end) text.substring(span.first, end) else ""
     }
 
     /**
@@ -264,7 +372,15 @@ internal class TerminalScreenState(
 
     /**
      * Update the snapshot while preserving UI state (scroll position).
-     * This allows the terminal content to update without resetting the scroll position.
+     *
+     * When a user is scrolled up reading history and new content arrives (or a
+     * resize / reconnect changes the scrollback size), the content at their
+     * current viewport must stay visible. That requires adjusting
+     * [scrollbackPosition] by the delta between old and new scrollback sizes —
+     * otherwise the visible lines shift with each update.
+     *
+     * A user already at the bottom ([scrollbackPosition] == 0) stays at the
+     * bottom by definition and needs no adjustment.
      *
      * @param newSnapshot The new snapshot to use
      */
@@ -272,29 +388,14 @@ internal class TerminalScreenState(
         val oldScrollbackSize = snapshot.scrollback.size
         val newScrollbackSize = newSnapshot.scrollback.size
         snapshot = newSnapshot
-
-        // Adjust scroll position when scrollback size changes (e.g. terminal resize).
-        // If user was at the bottom, keep them there.
-        // If scrolled up, adjust by the delta so the same content stays visible.
-        if (scrollbackPosition == 0) {
-            // At bottom — stay at bottom (no adjustment needed)
-        } else {
+        if (scrollbackPosition != 0) {
             val delta = newScrollbackSize - oldScrollbackSize
             scrollbackPosition = (scrollbackPosition + delta).coerceIn(0, newScrollbackSize)
         }
     }
-
-    companion object {
-        // Cells of slack at the right margin of a row that still count as
-        // a "full row" for the purpose of deciding whether the next row is
-        // a URL-wrap continuation. A CLI that hard-wraps at its advertised
-        // column may leave up to a couple of unused cells depending on
-        // exact alignment, so 2 is a compromise between picking up real
-        // wraps and not false-positively gluing an unrelated short line
-        // onto the end of a URL.
-        internal const val CONTINUATION_SLACK_TOLERANCE = 2
-    }
 }
+
+private const val MAX_URL_CONTINUATION_ROWS = 6
 
 /**
  * Remember a TerminalScreenState that observes the given TerminalEmulator.
@@ -309,20 +410,19 @@ internal class TerminalScreenState(
 internal fun rememberTerminalScreenState(
     terminalEmulator: TerminalEmulatorImpl,
 ): TerminalScreenState {
-    val snapshot by remember(terminalEmulator) {
-        terminalEmulator.snapshot
-    }.collectAsState()
-
-    // Create state instance once per emulator, but update its snapshot when it changes
+    // Create state instance once per emulator, using the current value as initial
     val state = remember(terminalEmulator) {
-        TerminalScreenState(snapshot)
+        TerminalScreenState(terminalEmulator.snapshot.value)
     }
 
-    // Update the snapshot without recreating the state object (preserves scrollbackPosition)
-    state.updateSnapshot(snapshot)
+    // Collecting in a LaunchedEffect keeps this adapter composable stable instead of
+    // recomposing it because of Flow collection in this function. Updates to
+    // state.snapshot still invalidate/recompose any composables that read it.
+    LaunchedEffect(terminalEmulator) {
+        terminalEmulator.snapshot.collect { newSnapshot ->
+            state.updateSnapshot(newSnapshot)
+        }
+    }
 
     return state
 }
-
-/** True if the character commonly appears in URLs (query params, percent encoding, path). */
-internal fun Char.isUrlSafe(): Boolean = isLetterOrDigit() || this in "/:@!$&'()*+,;=-._~%?#[]"

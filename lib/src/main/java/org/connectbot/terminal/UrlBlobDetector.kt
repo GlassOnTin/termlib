@@ -171,7 +171,10 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
             var r = 0
             while (r < rows) {
                 val ch = cellChar[r][c]
-                if (ch.isBlobUrlSafe() || ch.isWhitespace()) { r++; continue }
+                if (ch.isBlobUrlSafe() || ch.isWhitespace()) {
+                    r++
+                    continue
+                }
                 var runEnd = r
                 while (runEnd + 1 < rows && cellChar[runEnd + 1][c] == ch) runEnd++
                 if (runEnd - r >= 1) {
@@ -228,6 +231,7 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
      *    (no structural frame).  The continuation row's first URL-safe
      *    run must contain `/` (strong URL signal to accept the join).
      */
+
     /**
      * Returns the column on `curRow` at which the URL continues (if it does),
      * or null if `curRow` is not a continuation of the URL starting at
@@ -241,8 +245,11 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
     ): Int? {
         if (prevRow < 0 || curRow >= rows) return null
 
-        val prevUrlStart = if (prevRow == anchorRow) anchorStartCol
-                           else firstUrlSafeColAfterPrefix(prevRow) ?: return null
+        val prevUrlStart = if (prevRow == anchorRow) {
+            anchorStartCol
+        } else {
+            firstUrlSafeColAfterPrefix(prevRow) ?: return null
+        }
         val prevUrlEnd = findUrlSafeRunEnd(prevRow, prevUrlStart) ?: return null
         if (!cellChar[prevRow][prevUrlEnd].isBlobUrlSafe()) return null
 
@@ -301,7 +308,7 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
             val ch = cellChar[r][c]
             if (ch.isWhitespace()) continue
             if (structural[r][c]) continue
-            if (!ch.isBlobUrlSafe()) continue      // single-row formatting
+            if (!ch.isBlobUrlSafe()) continue // single-row formatting
             return c
         }
         return null
@@ -317,7 +324,7 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
             val ch = cellChar[r][c]
             if (ch.isWhitespace()) continue
             if (structural[r][c]) continue
-            if (!ch.isBlobUrlSafe()) continue          // single-row formatting (⎿, ●, etc.)
+            if (!ch.isBlobUrlSafe()) continue // single-row formatting (⎿, ●, etc.)
             return c
         }
         return null
@@ -335,7 +342,10 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
             }
             // Structural columns count as pass-through for span computation;
             // the URL-safe run can resume after them.
-            if (structural[r][c]) { c++; continue }
+            if (structural[r][c]) {
+                c++
+                continue
+            }
             break
         }
         return if (last >= start) last else null
@@ -345,8 +355,11 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
         var c = span.first
         while (c <= span.last) {
             val ch = cellChar[r][c]
-            if (ch.isBlobUrlSafe() || structural[r][c]) { c++; continue }
-            return false     // terminator / mid-row whitespace inside the hull
+            if (ch.isBlobUrlSafe() || structural[r][c]) {
+                c++
+                continue
+            }
+            return false // terminator / mid-row whitespace inside the hull
         }
         return true
     }
@@ -380,8 +393,7 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
      * through, because log output like "Bash(curl URL)" is much more
      * common than Wikipedia-style URLs containing balanced parens.
      */
-    private fun Char.isBlobUrlSafe(): Boolean =
-        isLetterOrDigit() || this in "/:@!$&'*+,;=-._~%?#"
+    private fun Char.isBlobUrlSafe(): Boolean = isLetterOrDigit() || this in "/:@!$&'*+,;=-._~%?#"
 
     companion object {
         private val ANCHORS = listOf("https://", "http://", "ftp://")

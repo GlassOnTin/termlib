@@ -57,21 +57,19 @@ class TapToPositionCursorTest {
         sequenceNumber = 0L,
     )
 
-    private fun commandInputAt(col: Int, promptId: Int = 1): SemanticSegment =
-        SemanticSegment(
-            startCol = col,
-            endCol = col,
-            semanticType = SemanticType.COMMAND_INPUT,
-            promptId = promptId,
-        )
+    private fun commandInputAt(col: Int, promptId: Int = 1): SemanticSegment = SemanticSegment(
+        startCol = col,
+        endCol = col,
+        semanticType = SemanticType.COMMAND_INPUT,
+        promptId = promptId,
+    )
 
-    private fun commandFinishedAt(col: Int, promptId: Int = 1): SemanticSegment =
-        SemanticSegment(
-            startCol = col,
-            endCol = col,
-            semanticType = SemanticType.COMMAND_FINISHED,
-            promptId = promptId,
-        )
+    private fun commandFinishedAt(col: Int, promptId: Int = 1): SemanticSegment = SemanticSegment(
+        startCol = col,
+        endCol = col,
+        semanticType = SemanticType.COMMAND_FINISHED,
+        promptId = promptId,
+    )
 
     @Test
     fun `dispatches right-arrows when tap is past cursor on prompt line`() {

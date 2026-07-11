@@ -16,6 +16,8 @@
  */
 package org.connectbot.terminal
 
+import androidx.compose.runtime.Immutable
+
 /**
  * Semantic type for terminal content, derived from shell integration sequences.
  *
@@ -59,6 +61,7 @@ internal enum class SemanticType {
  * @param metadata Optional metadata (e.g., exit code for COMMAND_FINISHED)
  * @param promptId Groups segments that belong to the same command execution
  */
+@Immutable
 internal data class SemanticSegment(
     val startCol: Int,
     val endCol: Int,
@@ -70,6 +73,11 @@ internal data class SemanticSegment(
      * Check if a column is within this segment's range.
      */
     fun contains(col: Int): Boolean = col >= startCol && col < endCol
+
+    /**
+     * Check if this segment overlaps the half-open column range [start, end).
+     */
+    fun overlaps(start: Int, end: Int): Boolean = startCol < end && start < endCol
 
     /**
      * Get the length of this segment in columns.

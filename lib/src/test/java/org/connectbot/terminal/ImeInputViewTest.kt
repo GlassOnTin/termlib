@@ -1034,9 +1034,13 @@ class ImeInputViewTest {
         override fun isCtrlActive() = ctrl
         override fun isAltActive() = alt
         override fun isShiftActive() = false
+
         // Mirror the production one-shot reset (TerminalScreen wires
         // clearTransients -> viewModel.clearStickyModifiers).
-        override fun clearTransients() { ctrl = false; alt = false }
+        override fun clearTransients() {
+            ctrl = false
+            alt = false
+        }
     }
 
     private fun createFullEditorCaptureWithModifiers(
@@ -1059,8 +1063,7 @@ class ImeInputViewTest {
         return Triple(ic!!, handler, outputs)
     }
 
-    private fun composeKeyDown(keyCode: Int) =
-        androidx.compose.ui.input.key.KeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+    private fun composeKeyDown(keyCode: Int) = androidx.compose.ui.input.key.KeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
 
     @Test
     fun testStandardModeCtrlComboDispatchesControlCharAndConsumesModifier() {
@@ -1134,8 +1137,7 @@ class ImeInputViewTest {
     // shell receives the text AND the newline, exactly once, in order.
 
     /** Raw bytes to the PTY, undecoded — newline assertions need the \r. */
-    private fun rawText(outputs: List<ByteArray>): String =
-        outputs.flatMap { it.toList() }.toByteArray().toString(Charsets.UTF_8)
+    private fun rawText(outputs: List<ByteArray>): String = outputs.flatMap { it.toList() }.toByteArray().toString(Charsets.UTF_8)
 
     /** Run delayed main-looper tasks (the 16 ms deferred-Enter fallback). */
     private fun advanceMainLooper(ms: Long = 32) {

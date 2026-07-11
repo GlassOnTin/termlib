@@ -21,8 +21,13 @@ import android.content.Intent
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Typeface
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.text.TextPaint
 import android.util.Log
+import android.view.InputDevice
+import android.view.MotionEvent
 import androidx.annotation.VisibleForTesting
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.splineBasedDecay
@@ -50,11 +55,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -85,7 +91,9 @@ import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -94,14 +102,6 @@ import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalViewConfiguration
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInRoot
-import androidx.compose.runtime.mutableFloatStateOf
-import android.os.Handler
-import android.os.Looper
-import android.os.SystemClock
-import android.view.InputDevice
-import android.view.MotionEvent
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -130,6 +130,7 @@ private enum class GestureType {
     Selection,
     Zoom,
     HandleDrag,
+
     /**
      * Mouse drag forwarded to the remote (tmux mouse mode). Press/motion/release
      * dispatched via [TerminalGestureCallback.onMouseDrag]. Selected when
@@ -592,8 +593,10 @@ internal fun TerminalWithAccessibility(
     // text never has to be projected into the terminal itself — avoids the
     // backspace-and-rewrite flicker that inline projection produced during
     // CJK conversion, and avoids paying per-keystroke round-trips over mosh.
-    val imeComposerText by (imeInputView?.composingText
-        ?: remember { kotlinx.coroutines.flow.MutableStateFlow("") }).collectAsState()
+    val imeComposerText by (
+        imeInputView?.composingText
+            ?: remember { kotlinx.coroutines.flow.MutableStateFlow("") }
+        ).collectAsState()
 
     // Cleanup IME when component is disposed
     DisposableEffect(imeInputView) {
@@ -790,16 +793,12 @@ internal fun TerminalWithAccessibility(
                 selectionManager.updateSelectionEnd(row, col)
             }
 
-            override fun getSelectionRange(): SelectionRange? {
-                return selectionManager.selectionRange
-            }
+            override fun getSelectionRange(): SelectionRange? = selectionManager.selectionRange
 
-            override fun getSelectedText(): String {
-                return selectionManager.getSelectedText(
-                    screenState.snapshot,
-                    screenState.scrollbackPosition,
-                )
-            }
+            override fun getSelectedText(): String = selectionManager.getSelectedText(
+                screenState.snapshot,
+                screenState.scrollbackPosition,
+            )
 
             override fun shiftSelectionStartByRows(delta: Int) {
                 selectionManager.shiftSelectionStartByRows(delta)
@@ -1271,783 +1270,809 @@ internal fun TerminalWithAccessibility(
                 // content already fits above the keyboard — no render shift,
                 // and the top status row can't be pushed off the top.
                 0f
-            } else run {
-                val covered = (maxAvailableHeight - availableHeight).coerceAtLeast(0).toFloat()
-                // Bottom-most non-blank row — what the user expects pinned above
-                // the keyboard. Scanned only when a shift might apply (keyboard
-                // up, primary buffer, at the live bottom); 0 otherwise so the
-                // common keyboard-down path skips the row sweep entirely.
-                val lastContentRow =
-                    if (covered <= 0f || screenState.snapshot.altScreen ||
-                        screenState.scrollbackPosition != 0
-                    ) {
-                        screenState.snapshot.cursorRow
-                    } else {
-                        (screenState.snapshot.rows - 1 downTo 0)
-                            .firstOrNull { screenState.getVisibleLine(it).text.isNotBlank() }
-                            ?: screenState.snapshot.cursorRow
-                    }
-                keyboardCoveredShiftPx(
-                    covered = covered,
-                    altScreen = screenState.snapshot.altScreen,
-                    scrollbackPosition = screenState.scrollbackPosition,
-                    cursorRow = screenState.snapshot.cursorRow,
-                    lastContentRow = lastContentRow,
-                    charHeight = baseCharHeight,
-                    availableHeight = availableHeight,
-                )
+            } else {
+                run {
+                    val covered = (maxAvailableHeight - availableHeight).coerceAtLeast(0).toFloat()
+                    // Bottom-most non-blank row — what the user expects pinned above
+                    // the keyboard. Scanned only when a shift might apply (keyboard
+                    // up, primary buffer, at the live bottom); 0 otherwise so the
+                    // common keyboard-down path skips the row sweep entirely.
+                    val lastContentRow =
+                        if (covered <= 0f || screenState.snapshot.altScreen ||
+                            screenState.scrollbackPosition != 0
+                        ) {
+                            screenState.snapshot.cursorRow
+                        } else {
+                            (screenState.snapshot.rows - 1 downTo 0)
+                                .firstOrNull { screenState.getVisibleLine(it).text.isNotBlank() }
+                                ?: screenState.snapshot.cursorRow
+                        }
+                    keyboardCoveredShiftPx(
+                        covered = covered,
+                        altScreen = screenState.snapshot.altScreen,
+                        scrollbackPosition = screenState.scrollbackPosition,
+                        cursorRow = screenState.snapshot.cursorRow,
+                        lastContentRow = lastContentRow,
+                        charHeight = baseCharHeight,
+                        availableHeight = availableHeight,
+                    )
+                }
             },
         )
 
         // Draw terminal content with context menu overlay
         Box(
-            modifier = (if (forcedSize != null) {
-                // Add border outside the terminal content
-                Modifier
-                    .size(
-                        width = with(density) { terminalWidthPx.toDp() },
-                        height = with(density) { terminalHeightPx.toDp() }
-                    )
-                    .border(
-                        width = TERMINAL_BORDER_WIDTH,
-                        color = Color(0xFF4CAF50).copy(alpha = 0.6f)
-                    )
-            } else {
-                Modifier.fillMaxSize()
-            })
+            modifier = (
+                if (forcedSize != null) {
+                    // Add border outside the terminal content
+                    Modifier
+                        .size(
+                            width = with(density) { terminalWidthPx.toDp() },
+                            height = with(density) { terminalHeightPx.toDp() },
+                        )
+                        .border(
+                            width = TERMINAL_BORDER_WIDTH,
+                            color = Color(0xFF4CAF50).copy(alpha = 0.6f),
+                        )
+                } else {
+                    Modifier.fillMaxSize()
+                }
+                )
                 .onGloballyPositioned { contentOriginInRoot = it.positionInRoot() }
                 .pointerInput(terminalEmulator, gestureCallback) {
-                // Shadow the composition-scope metrics with fresh State reads:
-                // this block's closure outlives any pinch-zoom font change.
-                val baseCharWidth by currentCharWidth
-                val baseCharHeight by currentCharHeight
-                val touchSlopSquared =
-                    viewConfiguration.touchSlop * viewConfiguration.touchSlop
-                var lastMultiTouchTime = 0L
-                var lastTapTime = 0L
-                coroutineScope {
-                    awaitEachGesture {
-                        var gestureType: GestureType = GestureType.Undetermined
-                        val down = awaitFirstDown(requireUnconsumed = false)
+                    // Shadow the composition-scope metrics with fresh State reads:
+                    // this block's closure outlives any pinch-zoom font change.
+                    val baseCharWidth by currentCharWidth
+                    val baseCharHeight by currentCharHeight
+                    val touchSlopSquared =
+                        viewConfiguration.touchSlop * viewConfiguration.touchSlop
+                    var lastMultiTouchTime = 0L
+                    var lastTapTime = 0L
+                    coroutineScope {
+                        awaitEachGesture {
+                            var gestureType: GestureType = GestureType.Undetermined
+                            val down = awaitFirstDown(requireUnconsumed = false)
 
-                        // Suppress taps/swipes for a window after pinch-to-zoom ends
-                        val sincePinch = System.currentTimeMillis() - lastMultiTouchTime
-                        val inPinchCooldown = sincePinch < MULTITOUCH_LIFTOFF_MS
+                            // Suppress taps/swipes for a window after pinch-to-zoom ends
+                            val sincePinch = System.currentTimeMillis() - lastMultiTouchTime
+                            val inPinchCooldown = sincePinch < MULTITOUCH_LIFTOFF_MS
 
-                        // 1. Check if touching a selection handle first
-                        if (gestureType == GestureType.Undetermined && selectionManager.mode != SelectionMode.NONE && !selectionManager.isSelecting) {
-                            val range = selectionManager.selectionRange
-                            if (range != null) {
-                                val (touchingStart, touchingEnd) = isTouchingHandle(
-                                    down.position,
-                                    range,
-                                    baseCharWidth,
-                                    baseCharHeight,
-                                    keyboardCoveredPx = keyboardCoveredPx,
-                                )
-                                if (touchingStart || touchingEnd) {
-                                    gestureType = GestureType.HandleDrag
-                                    // Handle drag
-                                    showMagnifier = true
-                                    magnifierPosition = down.position
-                                    handleDragActive = true
+                            // 1. Check if touching a selection handle first
+                            if (gestureType == GestureType.Undetermined && selectionManager.mode != SelectionMode.NONE && !selectionManager.isSelecting) {
+                                val range = selectionManager.selectionRange
+                                if (range != null) {
+                                    val (touchingStart, touchingEnd) = isTouchingHandle(
+                                        down.position,
+                                        range,
+                                        baseCharWidth,
+                                        baseCharHeight,
+                                        keyboardCoveredPx = keyboardCoveredPx,
+                                    )
+                                    if (touchingStart || touchingEnd) {
+                                        gestureType = GestureType.HandleDrag
+                                        // Handle drag
+                                        showMagnifier = true
+                                        magnifierPosition = down.position
+                                        handleDragActive = true
 
-                                    // Local variable to keep track of which handle we are moving in case they cross
-                                    var isMovingStart = touchingStart
-                                    // Latest pointer position, fed to the
-                                    // edge-scroll ticker below.
-                                    var handleDragPosition = down.position
+                                        // Local variable to keep track of which handle we are moving in case they cross
+                                        var isMovingStart = touchingStart
+                                        // Latest pointer position, fed to the
+                                        // edge-scroll ticker below.
+                                        var handleDragPosition = down.position
 
-                                    // Re-place the dragged handle at the current
-                                    // pointer position. Shared by the drag loop and
-                                    // the edge-scroll ticker.
-                                    fun applyHandleAt(pos: Offset) {
-                                        val newCol =
-                                            (pos.x / baseCharWidth).toInt()
-                                                .coerceIn(0, screenState.snapshot.cols - 1)
-                                        val newRow =
-                                            ((pos.y + keyboardCoveredPx) / baseCharHeight).toInt()
-                                                .coerceIn(0, screenState.snapshot.rows - 1)
+                                        // Re-place the dragged handle at the current
+                                        // pointer position. Shared by the drag loop and
+                                        // the edge-scroll ticker.
+                                        fun applyHandleAt(pos: Offset) {
+                                            val newCol =
+                                                (pos.x / baseCharWidth).toInt()
+                                                    .coerceIn(0, screenState.snapshot.cols - 1)
+                                            val newRow =
+                                                ((pos.y + keyboardCoveredPx) / baseCharHeight).toInt()
+                                                    .coerceIn(0, screenState.snapshot.rows - 1)
 
-                                        val current = selectionManager.selectionRange
-                                            ?: return
-                                        val result = applyHandleDrag(
-                                            startRow = current.startRow,
-                                            startCol = current.startCol,
-                                            endRow = current.endRow,
-                                            endCol = current.endCol,
-                                            isMovingStart = isMovingStart,
-                                            newRow = newRow,
-                                            newCol = newCol,
-                                        )
-                                        isMovingStart = result.isMovingStart
-                                        selectionManager.updateSelectionStart(result.startRow, result.startCol)
-                                        selectionManager.updateSelectionEnd(result.endRow, result.endCol)
+                                            val current = selectionManager.selectionRange
+                                                ?: return
+                                            val result = applyHandleDrag(
+                                                startRow = current.startRow,
+                                                startCol = current.startCol,
+                                                endRow = current.endRow,
+                                                endCol = current.endCol,
+                                                isMovingStart = isMovingStart,
+                                                newRow = newRow,
+                                                newCol = newCol,
+                                            )
+                                            isMovingStart = result.isMovingStart
+                                            selectionManager.updateSelectionStart(result.startRow, result.startCol)
+                                            selectionManager.updateSelectionEnd(result.endRow, result.endCol)
+                                            selectionManager.adjustSelectionForMode(
+                                                screenState.snapshot.cols,
+                                                screenState.snapshot,
+                                                screenState.scrollbackPosition,
+                                            )
+                                        }
+
+                                        // Auto-repeat edge-scroll while the handle sits
+                                        // in the top/bottom edge zone. Unlike the
+                                        // Selection/MouseDrag paths there is no inline
+                                        // edge-scroll for handle drags, so this ticker is
+                                        // the sole driver and runs whether the handle is
+                                        // moving or held still. The scrollback
+                                        // LaunchedEffect is gated off via handleDragActive,
+                                        // so shift both anchors here to keep the selection
+                                        // pinned to its content, then re-place the dragged
+                                        // handle under the (possibly stationary) finger. (#94)
+                                        val handleEdgeScrollJob = launch {
+                                            while (true) {
+                                                delay(EDGE_SCROLL_TICK_MS)
+                                                if (selectionManager.selectionRange == null) continue
+                                                val viewportH =
+                                                    visibleViewportPx
+                                                val dir = edgeScrollDirection(
+                                                    handleDragPosition.y,
+                                                    viewportH,
+                                                    screenState.scrollbackPosition,
+                                                    screenState.snapshot.scrollback.size,
+                                                )
+                                                if (dir == EdgeScroll.NONE) continue
+                                                // Velocity scales with how deep the
+                                                // finger is in the edge zone — at the
+                                                // inner edge of the zone the scroll
+                                                // rate matches the old fixed 1 row/tick,
+                                                // at the screen edge it caps at
+                                                // MAX_EDGE_SCROLL_ROWS rows/tick.
+                                                val rows = edgeScrollRowsPerTick(
+                                                    handleDragPosition.y,
+                                                    viewportH,
+                                                    dir,
+                                                )
+                                                val delta = if (dir == EdgeScroll.UP) +rows else -rows
+                                                screenState.scrollBy(delta)
+                                                selectionManager.shiftSelectionByRows(delta)
+                                                scrollOffset.snapTo(
+                                                    screenState.scrollbackPosition * baseCharHeight,
+                                                )
+                                                applyHandleAt(handleDragPosition)
+                                            }
+                                        }
+
+                                        try {
+                                            drag(down.id) { change ->
+                                                handleDragPosition = change.position
+                                                applyHandleAt(change.position)
+                                                magnifierPosition = change.position
+                                                change.consume()
+                                            }
+                                        } finally {
+                                            handleEdgeScrollJob.cancel()
+                                            handleDragActive = false
+                                        }
+
+                                        // After lifting finger, ensure selection is fully adjusted and handles snap
                                         selectionManager.adjustSelectionForMode(
                                             screenState.snapshot.cols,
                                             screenState.snapshot,
                                             screenState.scrollbackPosition,
                                         )
+                                        // Re-sort start/end to reading order once the
+                                        // drag commits (start = top-left-most char).
+                                        selectionManager.endSelection()
+
+                                        showMagnifier = false
+                                        // Don't auto-show menu again after dragging handle
+                                        return@awaitEachGesture
                                     }
-
-                                    // Auto-repeat edge-scroll while the handle sits
-                                    // in the top/bottom edge zone. Unlike the
-                                    // Selection/MouseDrag paths there is no inline
-                                    // edge-scroll for handle drags, so this ticker is
-                                    // the sole driver and runs whether the handle is
-                                    // moving or held still. The scrollback
-                                    // LaunchedEffect is gated off via handleDragActive,
-                                    // so shift both anchors here to keep the selection
-                                    // pinned to its content, then re-place the dragged
-                                    // handle under the (possibly stationary) finger. (#94)
-                                    val handleEdgeScrollJob = launch {
-                                        while (true) {
-                                            delay(EDGE_SCROLL_TICK_MS)
-                                            if (selectionManager.selectionRange == null) continue
-                                            val viewportH =
-                                                visibleViewportPx
-                                            val dir = edgeScrollDirection(
-                                                handleDragPosition.y, viewportH,
-                                                screenState.scrollbackPosition,
-                                                screenState.snapshot.scrollback.size,
-                                            )
-                                            if (dir == EdgeScroll.NONE) continue
-                                            // Velocity scales with how deep the
-                                            // finger is in the edge zone — at the
-                                            // inner edge of the zone the scroll
-                                            // rate matches the old fixed 1 row/tick,
-                                            // at the screen edge it caps at
-                                            // MAX_EDGE_SCROLL_ROWS rows/tick.
-                                            val rows = edgeScrollRowsPerTick(
-                                                handleDragPosition.y, viewportH, dir,
-                                            )
-                                            val delta = if (dir == EdgeScroll.UP) +rows else -rows
-                                            screenState.scrollBy(delta)
-                                            selectionManager.shiftSelectionByRows(delta)
-                                            scrollOffset.snapTo(
-                                                screenState.scrollbackPosition * baseCharHeight
-                                            )
-                                            applyHandleAt(handleDragPosition)
-                                        }
-                                    }
-
-                                    try {
-                                        drag(down.id) { change ->
-                                            handleDragPosition = change.position
-                                            applyHandleAt(change.position)
-                                            magnifierPosition = change.position
-                                            change.consume()
-                                        }
-                                    } finally {
-                                        handleEdgeScrollJob.cancel()
-                                        handleDragActive = false
-                                    }
-
-                                    // After lifting finger, ensure selection is fully adjusted and handles snap
-                                    selectionManager.adjustSelectionForMode(
-                                        screenState.snapshot.cols,
-                                        screenState.snapshot,
-                                        screenState.scrollbackPosition,
-                                    )
-                                    // Re-sort start/end to reading order once the
-                                    // drag commits (start = top-left-most char).
-                                    selectionManager.endSelection()
-
-                                    showMagnifier = false
-                                    // Don't auto-show menu again after dragging handle
-                                    return@awaitEachGesture
-                                }
-                            }
-                        }
-
-                        // 2. Long press detection
-                        // Long-press always starts a Haven-local selection so the
-                        // visible Copy/menu workflow works in every session,
-                        // including tmux/zellij mouse-mode tabs. The previous
-                        // callback-driven path (CALLBACK_LONG_PRESS_MS → onLongPress
-                        // right-click and "long-press-then-drag = multiplexer
-                        // copy-mode", #186) is retired — tmux's own copy-mode is
-                        // still reachable via its Ctrl-B [ keybinding.
-                        var longPressDetected = false
-                        var gestureEnded = false
-                        // Kept (always false) so the existing drag-detection branches
-                        // (`if (armMouseDrag)` / `!callbackLongPressFired`) compile
-                        // without surgery and fall through to the plain-swipe path.
-                        val callbackLongPressFired = false
-                        val armMouseDrag = false
-                        val callbackLongPressJob: kotlinx.coroutines.Job? = null
-
-                        val longPressJob = launch {
-                            delay(viewConfiguration.longPressTimeoutMillis)
-                            // Haven-local text selection on long-press. Previously
-                            // gated to pure-terminal mode (no gestureCallback) so
-                            // the multiplexer could own mouse-mode selection via
-                            // long-press-then-drag (#186), but that left tmux/zellij
-                            // users with no usable "select text and tap Copy"
-                            // workflow — they had to drop into copy-mode via
-                            // Ctrl-B [ and lose the visible-on-screen Copy button.
-                            // Restored: long-press always starts a Haven local
-                            // selection; tmux's own copy-mode remains reachable
-                            // via its keybinding.
-                            if (gestureType == GestureType.Undetermined &&
-                                selectionManager.mode == SelectionMode.NONE &&
-                                !gestureEnded
-                            ) {
-                                longPressDetected = true
-                                gestureType = GestureType.Selection
-
-                                // Start selection
-                                val col = (down.position.x / baseCharWidth).toInt()
-                                    .coerceIn(0, screenState.snapshot.cols - 1)
-                                val row = ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
-                                    .coerceIn(0, screenState.snapshot.rows - 1)
-                                selectionManager.startSelection(
-                                    row,
-                                    col,
-                                    screenState.snapshot.cols,
-                                    SelectionMode.CHARACTER,
-                                )
-                                hostView.performHapticFeedback(
-                                    android.view.HapticFeedbackConstants.LONG_PRESS
-                                )
-                                showMagnifier = true
-                                magnifierPosition = down.position
-                            }
-                        }
-
-                        // 3. Check for multi-touch (zoom)
-                        val secondPointer = withTimeoutOrNull(
-                            WAIT_FOR_SECOND_TOUCH_MS
-                        ) {
-                            awaitPointerEvent().changes.firstOrNull { it.id != down.id && it.pressed }
-                        }
-
-                        if (secondPointer != null && forcedSize == null) {
-                            longPressJob.cancel()
-                            callbackLongPressJob?.cancel()
-
-                            // Two fingers: disambiguate pinch-zoom (font size)
-                            // from a two-finger pan. The pan scrolls **Haven's
-                            // own scrollback** (local ring) — deliberately
-                            // distinct from a one-finger swipe, which forwards
-                            // the wheel to the remote/mouse-mode app. Single
-                            // finger = remote side, two fingers = Haven side, so
-                            // you can reach Haven's buffer even while a mouse-mode
-                            // app (tmux/zellij) consumes the one-finger wheel.
-                            // Scale divergence => zoom; parallel vertical motion
-                            // => local scroll; whichever crosses its threshold
-                            // first wins and locks for the rest of the gesture. (#186)
-                            val startFontSize = calculatedFontSize.value
-                            var cumulativeZoom = 1f
-                            var decideAccumY = 0f
-                            var mode = 0 // 0 = undecided, 1 = zoom, 2 = scroll
-                            val zoomDecide = 0.08f
-                            val panDecidePx = with(density) { 16.dp.toPx() }
-
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                if (event.changes.all { !it.pressed }) break
-                                if (event.changes.size > 1) {
-                                    cumulativeZoom *= event.calculateZoom()
-                                    val panY = event.calculatePan().y
-                                    if (mode == 0) {
-                                        decideAccumY += panY
-                                        when {
-                                            kotlin.math.abs(1f - cumulativeZoom) > zoomDecide -> {
-                                                mode = 1
-                                                gestureType = GestureType.Zoom
-                                            }
-                                            kotlin.math.abs(decideAccumY) > panDecidePx -> {
-                                                mode = 2
-                                                gestureType = GestureType.Scroll
-                                            }
-                                        }
-                                    }
-                                    when (mode) {
-                                        1 -> {
-                                            val newSize = (startFontSize * cumulativeZoom)
-                                                .coerceIn(MIN_PINCH_FONT_SP, MAX_PINCH_FONT_SP)
-                                            calculatedFontSize = newSize.sp
-                                        }
-                                        2 -> {
-                                            // Always Haven's local scrollback —
-                                            // never forward to the app. Pixel-smooth,
-                                            // mirroring the one-finger no-callback
-                                            // path. Natural scrolling: fingers down
-                                            // = older content (+panY).
-                                            val newOffset = (scrollOffset.value + panY)
-                                                .coerceIn(0f, maxScroll)
-                                            coroutineScope.launch { scrollOffset.snapTo(newOffset) }
-                                            val scrolledLines = (newOffset / baseCharHeight).toInt()
-                                            screenState.scrollBy(scrolledLines - screenState.scrollbackPosition)
-                                        }
-                                    }
-                                    event.changes.forEach { it.consume() }
                                 }
                             }
 
-                            if (mode == 1) {
-                                // Persist the new font size; flag prevents the
-                                // LaunchedEffect from resetting before round-trip.
-                                fontSetByPinch = true
-                                onFontSizeChanged?.invoke(calculatedFontSize)
-                            }
-                            lastMultiTouchTime = System.currentTimeMillis()
+                            // 2. Long press detection
+                            // Long-press always starts a Haven-local selection so the
+                            // visible Copy/menu workflow works in every session,
+                            // including tmux/zellij mouse-mode tabs. The previous
+                            // callback-driven path (CALLBACK_LONG_PRESS_MS → onLongPress
+                            // right-click and "long-press-then-drag = multiplexer
+                            // copy-mode", #186) is retired — tmux's own copy-mode is
+                            // still reachable via its Ctrl-B [ keybinding.
+                            var longPressDetected = false
+                            var gestureEnded = false
+                            // Kept (always false) so the existing drag-detection branches
+                            // (`if (armMouseDrag)` / `!callbackLongPressFired`) compile
+                            // without surgery and fall through to the plain-swipe path.
+                            val callbackLongPressFired = false
+                            val armMouseDrag = false
+                            val callbackLongPressJob: kotlinx.coroutines.Job? = null
 
-                            return@awaitEachGesture
-                        }
-
-                        // 4. Track velocity for scroll fling
-                        val velocityTracker = VelocityTracker()
-                        velocityTracker.addPosition(down.uptimeMillis, down.position)
-
-                        // 5. Event loop for single-touch gestures
-                        // Track accumulated scroll for callback quantization
-                        var accumulatedScrollY = 0f
-                        // Track whether this is a horizontal drag (tab swipe)
-                        var isHorizontalDrag = false
-                        // Last cell coordinates dispatched as a MouseDrag(Move),
-                        // used to quantize per-pixel events down to per-cell.
-                        var lastMouseDragCol = -1
-                        var lastMouseDragRow = -1
-                        // Latest pointer position + timestamp, fed to the
-                        // held-still edge-scroll ticker below.
-                        var lastDragPosition = down.position
-                        var lastDragEventTime = 0L
-
-                        // Auto-repeat edge-scroll for a finger held still in the
-                        // edge zone. The pointer-event loop only fires while the
-                        // finger moves; this ticker covers the stationary case for
-                        // Selection and MouseDrag. Cancelled in section 6. (#94)
-                        val edgeAutoScrollJob = launch {
-                            while (true) {
-                                delay(EDGE_SCROLL_TICK_MS)
-                                // If a pointer event arrived within the last tick the
-                                // inline edge-scroll already handled it — only act as
-                                // the held-still fallback.
-                                if (System.currentTimeMillis() - lastDragEventTime <
-                                    EDGE_SCROLL_TICK_MS
+                            val longPressJob = launch {
+                                delay(viewConfiguration.longPressTimeoutMillis)
+                                // Haven-local text selection on long-press. Previously
+                                // gated to pure-terminal mode (no gestureCallback) so
+                                // the multiplexer could own mouse-mode selection via
+                                // long-press-then-drag (#186), but that left tmux/zellij
+                                // users with no usable "select text and tap Copy"
+                                // workflow — they had to drop into copy-mode via
+                                // Ctrl-B [ and lose the visible-on-screen Copy button.
+                                // Restored: long-press always starts a Haven local
+                                // selection; tmux's own copy-mode remains reachable
+                                // via its keybinding.
+                                if (gestureType == GestureType.Undetermined &&
+                                    selectionManager.mode == SelectionMode.NONE &&
+                                    !gestureEnded
                                 ) {
-                                    continue
-                                }
-                                val viewportH = visibleViewportPx
-                                if (viewportH <= 0f) continue
-                                val dragCol = (lastDragPosition.x / baseCharWidth).toInt()
-                                    .coerceIn(0, screenState.snapshot.cols - 1)
-                                val dragRow = ((lastDragPosition.y + keyboardCoveredPx) / baseCharHeight).toInt()
-                                    .coerceIn(0, screenState.snapshot.rows - 1)
-                                when (gestureType) {
-                                    GestureType.Selection -> {
-                                        if (!selectionManager.isSelecting) continue
-                                        val dir = edgeScrollDirection(
-                                            lastDragPosition.y, viewportH,
-                                            screenState.scrollbackPosition,
-                                            screenState.snapshot.scrollback.size,
-                                        )
-                                        if (dir == EdgeScroll.NONE) continue
-                                        // Mouse-mode selections forward the wheel event;
-                                        // native selections scroll our own viewport and
-                                        // shift the start anchor in lockstep.
-                                        val handled = gestureCallback
-                                            ?.onScroll(dragCol, dragRow, dir == EdgeScroll.UP)
-                                            ?: false
-                                        if (!handled) {
-                                            val rows = edgeScrollRowsPerTick(
-                                                lastDragPosition.y, viewportH, dir,
-                                            )
-                                            val delta = if (dir == EdgeScroll.UP) +rows else -rows
-                                            screenState.scrollBy(delta)
-                                            selectionManager.shiftSelectionStartByRows(delta)
-                                            scrollOffset.snapTo(
-                                                screenState.scrollbackPosition * baseCharHeight
-                                            )
-                                        }
-                                        selectionManager.updateSelection(dragRow, dragCol)
-                                    }
-                                    GestureType.MouseDrag -> {
-                                        // Mouse-mode forwards wheel events to the remote
-                                        // regardless of our own scrollback depth — mirror
-                                        // the inline MouseDrag edge check (zone only).
-                                        val cb = gestureCallback ?: continue
-                                        val relY = lastDragPosition.y / viewportH
-                                        if (relY < EDGE_SCROLL_ZONE) {
-                                            cb.onScroll(dragCol, dragRow, true)
-                                        } else if (relY > 1f - EDGE_SCROLL_ZONE) {
-                                            cb.onScroll(dragCol, dragRow, false)
-                                        }
-                                    }
-                                    else -> {}
-                                }
-                            }
-                        }
+                                    longPressDetected = true
+                                    gestureType = GestureType.Selection
 
-                        while (true) {
-                            val event: PointerEvent =
-                                awaitPointerEvent(PointerEventPass.Main)
-                            if (event.changes.all { !it.pressed }) break
-
-                            val change = event.changes.first()
-                            velocityTracker.addPosition(
-                                change.uptimeMillis,
-                                change.position
-                            )
-                            // Use raw position delta — positionChange() may return
-                            // zero if pagerSwipeOverride consumed on Initial pass.
-                            val dragAmount = change.position - change.previousPosition
-
-                            // Feed the held-still edge-scroll ticker the latest
-                            // pointer position and timestamp.
-                            lastDragPosition = change.position
-                            lastDragEventTime = System.currentTimeMillis()
-
-                            // Determine gesture if still undetermined.
-                            // Use total distance from touch-down (not per-frame delta)
-                            // so moderate-speed scrolling still triggers classification.
-                            // Skip once a native selection has started (longPressDetected)
-                            // — the user is holding intentionally and movement extends it.
-                            if (gestureType == GestureType.Undetermined && !longPressDetected) {
-                                val totalDx = change.position.x - down.position.x
-                                val totalDy = change.position.y - down.position.y
-                                if (totalDx * totalDx + totalDy * totalDy > touchSlopSquared) {
-                                    val downCol = (down.position.x / baseCharWidth).toInt()
-                                        .coerceIn(0, screenState.snapshot.cols - 1)
-                                    val downRow = ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
-                                        .coerceIn(0, screenState.snapshot.rows - 1)
-                                    if (armMouseDrag) {
-                                        // Long-press-then-drag → forward the drag so the
-                                        // remote (tmux/zellij) runs its own pane-aware
-                                        // copy-mode selection. Falls back to Scroll if the
-                                        // callback declines (e.g. mouse input disabled). (#186)
-                                        longPressJob.cancel()
-                                        callbackLongPressJob?.cancel()
-                                        val claimed = gestureCallback
-                                            ?.onMouseDrag(downCol, downRow, MouseDragPhase.Start)
-                                            ?: false
-                                        gestureType = if (claimed) GestureType.MouseDrag else GestureType.Scroll
-                                    } else if (!callbackLongPressFired) {
-                                        // Plain one-finger swipe (no long-press).
-                                        val absDx = kotlin.math.abs(totalDx)
-                                        val absDy = kotlin.math.abs(totalDy)
-                                        if (absDx > absDy) {
-                                            // Horizontal drag — clear stale selection, let pager handle
-                                            isHorizontalDrag = true
-                                            longPressJob.cancel()
-                                            callbackLongPressJob?.cancel()
-                                            if (selectionManager.mode != SelectionMode.NONE) {
-                                                selectionManager.clearSelection()
-                                            }
-                                        } else {
-                                            // Vertical swipe → Scroll. In mouse mode this
-                                            // forwards the wheel to the app, scrolling the
-                                            // multiplexer pane; with no callback it scrolls
-                                            // Haven's local scrollback. A copy-mode selection
-                                            // now needs an explicit long-press first
-                                            // (armMouseDrag above), so a one-finger swipe is
-                                            // always a scroll and the two no longer fight
-                                            // over the same gesture. (#186)
-                                            longPressJob.cancel()
-                                            callbackLongPressJob?.cancel()
-                                            gestureType = GestureType.Scroll
-                                        }
-                                    }
-                                    // else: a right-click long-press already fired and was
-                                    // consumed — ignore the trailing drag.
-                                }
-                            }
-
-                            // Handle based on gesture type
-                            when (gestureType) {
-                                GestureType.Selection -> {
-                                    if (selectionManager.isSelecting) {
-                                        val dragCol =
-                                            (change.position.x / baseCharWidth).toInt()
-                                                .coerceIn(0, screenState.snapshot.cols - 1)
-                                        val dragRow =
-                                            ((change.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
-                                                .coerceIn(0, screenState.snapshot.rows - 1)
-
-                                        // Edge-zone extension. Two paths:
-                                        //  1. Mouse-mode (callback present) — forward
-                                        //     wheel events to the remote so e.g. tmux
-                                        //     copy-mode auto-scrolls and extends its
-                                        //     own selection.
-                                        //  2. Native (no callback) — scroll our own
-                                        //     viewport one line and shift the selection
-                                        //     anchor in lockstep so it stays on the
-                                        //     same logical content line. This is what
-                                        //     lets a drag-select extend off the top of
-                                        //     the viewport into scrollback (#94).
-                                        val relY = change.position.y /
-                                            (visibleViewportPx)
-                                        val nearTop = relY < EDGE_SCROLL_ZONE
-                                        val nearBottom = relY > 1f - EDGE_SCROLL_ZONE
-                                        val callbackHandled = if ((nearTop || nearBottom) && gestureCallback != null) {
-                                            gestureCallback.onScroll(dragCol, dragRow, nearTop)
-                                        } else false
-
-                                        if (!callbackHandled) {
-                                            if (nearTop && screenState.scrollbackPosition < screenState.snapshot.scrollback.size) {
-                                                screenState.scrollBy(+1)
-                                                selectionManager.shiftSelectionStartByRows(+1)
-                                                coroutineScope.launch {
-                                                    scrollOffset.snapTo(
-                                                        screenState.scrollbackPosition * baseCharHeight
-                                                    )
-                                                }
-                                            } else if (nearBottom && screenState.scrollbackPosition > 0) {
-                                                screenState.scrollBy(-1)
-                                                selectionManager.shiftSelectionStartByRows(-1)
-                                                coroutineScope.launch {
-                                                    scrollOffset.snapTo(
-                                                        screenState.scrollbackPosition * baseCharHeight
-                                                    )
-                                                }
-                                            }
-                                        }
-
-                                        selectionManager.updateSelection(
-                                            dragRow,
-                                            dragCol
-                                        )
-                                        magnifierPosition = change.position
-                                    }
-                                }
-
-                                GestureType.MouseDrag -> {
-                                    // Quantize motion to cell boundaries — the remote
-                                    // (tmux et al.) only cares about cell-resolution
-                                    // changes; sending per-pixel events would flood the
-                                    // wire and make tmux's selection-extension stutter.
-                                    val dragCol = (change.position.x / baseCharWidth).toInt()
-                                        .coerceIn(0, screenState.snapshot.cols - 1)
-                                    val dragRow = ((change.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
-                                        .coerceIn(0, screenState.snapshot.rows - 1)
-                                    if (dragCol != lastMouseDragCol || dragRow != lastMouseDragRow) {
-                                        gestureCallback?.onMouseDrag(dragCol, dragRow, MouseDragPhase.Move)
-                                        lastMouseDragCol = dragCol
-                                        lastMouseDragRow = dragRow
-                                    }
-                                    // Edge-zone wheel events: same shape as Selection's
-                                    // edge-scroll, so tmux's copy-mode auto-scroll +
-                                    // selection-extension fires when the finger reaches
-                                    // the top/bottom of the viewport.
-                                    if (gestureCallback != null) {
-                                        val relY = change.position.y /
-                                            (visibleViewportPx)
-                                        if (relY < EDGE_SCROLL_ZONE || relY > 1f - EDGE_SCROLL_ZONE) {
-                                            val scrollUp = relY < EDGE_SCROLL_ZONE
-                                            gestureCallback.onScroll(dragCol, dragRow, scrollUp)
-                                        }
-                                    }
-                                }
-
-                                GestureType.Scroll -> {
-                                    if (gestureCallback != null) {
-                                        // Quantized scroll: accumulate drag and fire
-                                        // callback for each SCROLL_THRESHOLD_PX crossed
-                                        accumulatedScrollY += dragAmount.y
-                                        while (kotlin.math.abs(accumulatedScrollY) >= SCROLL_THRESHOLD_PX) {
-                                            val draggedUp = accumulatedScrollY < 0
-                                            accumulatedScrollY += if (draggedUp) SCROLL_THRESHOLD_PX else -SCROLL_THRESHOLD_PX
-                                            // Natural scrolling: finger down = scroll up (older content)
-                                            val scrollUp = !draggedUp
-                                            val col = (change.position.x / baseCharWidth).toInt()
-                                                .coerceIn(0, screenState.snapshot.cols - 1)
-                                            val row = ((change.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
-                                                .coerceIn(0, screenState.snapshot.rows - 1)
-                                            val consumed = gestureCallback.onScroll(col, row, scrollUp)
-                                            if (!consumed) {
-                                                // Callback didn't handle it — do scrollback
-                                                val scrollDir = if (scrollUp) 1 else -1
-                                                screenState.scrollBy(scrollDir)
-                                                coroutineScope.launch {
-                                                    scrollOffset.snapTo(
-                                                        screenState.scrollbackPosition * baseCharHeight
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        // No callback: smooth pixel-level scrollback
-                                        val newOffset = (scrollOffset.value + dragAmount.y)
-                                            .coerceIn(0f, maxScroll)
-                                        coroutineScope.launch {
-                                            scrollOffset.snapTo(newOffset)
-                                        }
-
-                                        // Update terminal buffer scrollback position
-                                        val scrolledLines =
-                                            (newOffset / baseCharHeight).toInt()
-                                        screenState.scrollBy(scrolledLines - screenState.scrollbackPosition)
-                                    }
-                                }
-
-                                else -> {}
-                            }
-
-                            // Always consume on Main pass to prevent the
-                            // HorizontalPager's scrollable from intercepting
-                            // drags. Tab swiping still works because the
-                            // pagerSwipeOverride runs on Initial pass (before Main).
-                            change.consume()
-                        }
-
-                        // 6. Gesture ended - cleanup
-                        gestureEnded = true
-                        longPressJob.cancel()
-                        callbackLongPressJob?.cancel()
-                        edgeAutoScrollJob.cancel()
-                        when (gestureType) {
-                            GestureType.Scroll -> {
-                                // Flush any remaining accumulated scroll that didn't
-                                // reach the threshold — ensures small flicks register.
-                                if (gestureCallback != null && kotlin.math.abs(accumulatedScrollY) > SCROLL_THRESHOLD_PX / 3f) {
-                                    val scrollUp = accumulatedScrollY > 0  // natural: positive drag = scroll up
+                                    // Start selection
                                     val col = (down.position.x / baseCharWidth).toInt()
                                         .coerceIn(0, screenState.snapshot.cols - 1)
                                     val row = ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
                                         .coerceIn(0, screenState.snapshot.rows - 1)
-                                    val consumed = gestureCallback.onScroll(col, row, scrollUp)
-                                    if (!consumed) {
-                                        val scrollDir = if (scrollUp) 1 else -1
-                                        screenState.scrollBy(scrollDir)
-                                        coroutineScope.launch {
-                                            scrollOffset.snapTo(
-                                                screenState.scrollbackPosition * baseCharHeight
+                                    selectionManager.startSelection(
+                                        row,
+                                        col,
+                                        screenState.snapshot.cols,
+                                        SelectionMode.CHARACTER,
+                                    )
+                                    hostView.performHapticFeedback(
+                                        android.view.HapticFeedbackConstants.LONG_PRESS,
+                                    )
+                                    showMagnifier = true
+                                    magnifierPosition = down.position
+                                }
+                            }
+
+                            // 3. Check for multi-touch (zoom)
+                            val secondPointer = withTimeoutOrNull(
+                                WAIT_FOR_SECOND_TOUCH_MS,
+                            ) {
+                                awaitPointerEvent().changes.firstOrNull { it.id != down.id && it.pressed }
+                            }
+
+                            if (secondPointer != null && forcedSize == null) {
+                                longPressJob.cancel()
+                                callbackLongPressJob?.cancel()
+
+                                // Two fingers: disambiguate pinch-zoom (font size)
+                                // from a two-finger pan. The pan scrolls **Haven's
+                                // own scrollback** (local ring) — deliberately
+                                // distinct from a one-finger swipe, which forwards
+                                // the wheel to the remote/mouse-mode app. Single
+                                // finger = remote side, two fingers = Haven side, so
+                                // you can reach Haven's buffer even while a mouse-mode
+                                // app (tmux/zellij) consumes the one-finger wheel.
+                                // Scale divergence => zoom; parallel vertical motion
+                                // => local scroll; whichever crosses its threshold
+                                // first wins and locks for the rest of the gesture. (#186)
+                                val startFontSize = calculatedFontSize.value
+                                var cumulativeZoom = 1f
+                                var decideAccumY = 0f
+                                var mode = 0 // 0 = undecided, 1 = zoom, 2 = scroll
+                                val zoomDecide = 0.08f
+                                val panDecidePx = with(density) { 16.dp.toPx() }
+
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    if (event.changes.all { !it.pressed }) break
+                                    if (event.changes.size > 1) {
+                                        cumulativeZoom *= event.calculateZoom()
+                                        val panY = event.calculatePan().y
+                                        if (mode == 0) {
+                                            decideAccumY += panY
+                                            when {
+                                                kotlin.math.abs(1f - cumulativeZoom) > zoomDecide -> {
+                                                    mode = 1
+                                                    gestureType = GestureType.Zoom
+                                                }
+
+                                                kotlin.math.abs(decideAccumY) > panDecidePx -> {
+                                                    mode = 2
+                                                    gestureType = GestureType.Scroll
+                                                }
+                                            }
+                                        }
+                                        when (mode) {
+                                            1 -> {
+                                                val newSize = (startFontSize * cumulativeZoom)
+                                                    .coerceIn(MIN_PINCH_FONT_SP, MAX_PINCH_FONT_SP)
+                                                calculatedFontSize = newSize.sp
+                                            }
+
+                                            2 -> {
+                                                // Always Haven's local scrollback —
+                                                // never forward to the app. Pixel-smooth,
+                                                // mirroring the one-finger no-callback
+                                                // path. Natural scrolling: fingers down
+                                                // = older content (+panY).
+                                                val newOffset = (scrollOffset.value + panY)
+                                                    .coerceIn(0f, maxScroll)
+                                                coroutineScope.launch { scrollOffset.snapTo(newOffset) }
+                                                val scrolledLines = (newOffset / baseCharHeight).toInt()
+                                                screenState.scrollBy(scrolledLines - screenState.scrollbackPosition)
+                                            }
+                                        }
+                                        event.changes.forEach { it.consume() }
+                                    }
+                                }
+
+                                if (mode == 1) {
+                                    // Persist the new font size; flag prevents the
+                                    // LaunchedEffect from resetting before round-trip.
+                                    fontSetByPinch = true
+                                    onFontSizeChanged?.invoke(calculatedFontSize)
+                                }
+                                lastMultiTouchTime = System.currentTimeMillis()
+
+                                return@awaitEachGesture
+                            }
+
+                            // 4. Track velocity for scroll fling
+                            val velocityTracker = VelocityTracker()
+                            velocityTracker.addPosition(down.uptimeMillis, down.position)
+
+                            // 5. Event loop for single-touch gestures
+                            // Track accumulated scroll for callback quantization
+                            var accumulatedScrollY = 0f
+                            // Track whether this is a horizontal drag (tab swipe)
+                            var isHorizontalDrag = false
+                            // Last cell coordinates dispatched as a MouseDrag(Move),
+                            // used to quantize per-pixel events down to per-cell.
+                            var lastMouseDragCol = -1
+                            var lastMouseDragRow = -1
+                            // Latest pointer position + timestamp, fed to the
+                            // held-still edge-scroll ticker below.
+                            var lastDragPosition = down.position
+                            var lastDragEventTime = 0L
+
+                            // Auto-repeat edge-scroll for a finger held still in the
+                            // edge zone. The pointer-event loop only fires while the
+                            // finger moves; this ticker covers the stationary case for
+                            // Selection and MouseDrag. Cancelled in section 6. (#94)
+                            val edgeAutoScrollJob = launch {
+                                while (true) {
+                                    delay(EDGE_SCROLL_TICK_MS)
+                                    // If a pointer event arrived within the last tick the
+                                    // inline edge-scroll already handled it — only act as
+                                    // the held-still fallback.
+                                    if (System.currentTimeMillis() - lastDragEventTime <
+                                        EDGE_SCROLL_TICK_MS
+                                    ) {
+                                        continue
+                                    }
+                                    val viewportH = visibleViewportPx
+                                    if (viewportH <= 0f) continue
+                                    val dragCol = (lastDragPosition.x / baseCharWidth).toInt()
+                                        .coerceIn(0, screenState.snapshot.cols - 1)
+                                    val dragRow = ((lastDragPosition.y + keyboardCoveredPx) / baseCharHeight).toInt()
+                                        .coerceIn(0, screenState.snapshot.rows - 1)
+                                    when (gestureType) {
+                                        GestureType.Selection -> {
+                                            if (!selectionManager.isSelecting) continue
+                                            val dir = edgeScrollDirection(
+                                                lastDragPosition.y,
+                                                viewportH,
+                                                screenState.scrollbackPosition,
+                                                screenState.snapshot.scrollback.size,
                                             )
+                                            if (dir == EdgeScroll.NONE) continue
+                                            // Mouse-mode selections forward the wheel event;
+                                            // native selections scroll our own viewport and
+                                            // shift the start anchor in lockstep.
+                                            val handled = gestureCallback
+                                                ?.onScroll(dragCol, dragRow, dir == EdgeScroll.UP)
+                                                ?: false
+                                            if (!handled) {
+                                                val rows = edgeScrollRowsPerTick(
+                                                    lastDragPosition.y,
+                                                    viewportH,
+                                                    dir,
+                                                )
+                                                val delta = if (dir == EdgeScroll.UP) +rows else -rows
+                                                screenState.scrollBy(delta)
+                                                selectionManager.shiftSelectionStartByRows(delta)
+                                                scrollOffset.snapTo(
+                                                    screenState.scrollbackPosition * baseCharHeight,
+                                                )
+                                            }
+                                            selectionManager.updateSelection(dragRow, dragCol)
+                                        }
+
+                                        GestureType.MouseDrag -> {
+                                            // Mouse-mode forwards wheel events to the remote
+                                            // regardless of our own scrollback depth — mirror
+                                            // the inline MouseDrag edge check (zone only).
+                                            val cb = gestureCallback ?: continue
+                                            val relY = lastDragPosition.y / viewportH
+                                            if (relY < EDGE_SCROLL_ZONE) {
+                                                cb.onScroll(dragCol, dragRow, true)
+                                            } else if (relY > 1f - EDGE_SCROLL_ZONE) {
+                                                cb.onScroll(dragCol, dragRow, false)
+                                            }
+                                        }
+
+                                        else -> {}
+                                    }
+                                }
+                            }
+
+                            while (true) {
+                                val event: PointerEvent =
+                                    awaitPointerEvent(PointerEventPass.Main)
+                                if (event.changes.all { !it.pressed }) break
+
+                                val change = event.changes.first()
+                                velocityTracker.addPosition(
+                                    change.uptimeMillis,
+                                    change.position,
+                                )
+                                // Use raw position delta — positionChange() may return
+                                // zero if pagerSwipeOverride consumed on Initial pass.
+                                val dragAmount = change.position - change.previousPosition
+
+                                // Feed the held-still edge-scroll ticker the latest
+                                // pointer position and timestamp.
+                                lastDragPosition = change.position
+                                lastDragEventTime = System.currentTimeMillis()
+
+                                // Determine gesture if still undetermined.
+                                // Use total distance from touch-down (not per-frame delta)
+                                // so moderate-speed scrolling still triggers classification.
+                                // Skip once a native selection has started (longPressDetected)
+                                // — the user is holding intentionally and movement extends it.
+                                if (gestureType == GestureType.Undetermined && !longPressDetected) {
+                                    val totalDx = change.position.x - down.position.x
+                                    val totalDy = change.position.y - down.position.y
+                                    if (totalDx * totalDx + totalDy * totalDy > touchSlopSquared) {
+                                        val downCol = (down.position.x / baseCharWidth).toInt()
+                                            .coerceIn(0, screenState.snapshot.cols - 1)
+                                        val downRow = ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
+                                            .coerceIn(0, screenState.snapshot.rows - 1)
+                                        if (armMouseDrag) {
+                                            // Long-press-then-drag → forward the drag so the
+                                            // remote (tmux/zellij) runs its own pane-aware
+                                            // copy-mode selection. Falls back to Scroll if the
+                                            // callback declines (e.g. mouse input disabled). (#186)
+                                            longPressJob.cancel()
+                                            callbackLongPressJob?.cancel()
+                                            val claimed = gestureCallback
+                                                ?.onMouseDrag(downCol, downRow, MouseDragPhase.Start)
+                                                ?: false
+                                            gestureType = if (claimed) GestureType.MouseDrag else GestureType.Scroll
+                                        } else if (!callbackLongPressFired) {
+                                            // Plain one-finger swipe (no long-press).
+                                            val absDx = kotlin.math.abs(totalDx)
+                                            val absDy = kotlin.math.abs(totalDy)
+                                            if (absDx > absDy) {
+                                                // Horizontal drag — clear stale selection, let pager handle
+                                                isHorizontalDrag = true
+                                                longPressJob.cancel()
+                                                callbackLongPressJob?.cancel()
+                                                if (selectionManager.mode != SelectionMode.NONE) {
+                                                    selectionManager.clearSelection()
+                                                }
+                                            } else {
+                                                // Vertical swipe → Scroll. In mouse mode this
+                                                // forwards the wheel to the app, scrolling the
+                                                // multiplexer pane; with no callback it scrolls
+                                                // Haven's local scrollback. A copy-mode selection
+                                                // now needs an explicit long-press first
+                                                // (armMouseDrag above), so a one-finger swipe is
+                                                // always a scroll and the two no longer fight
+                                                // over the same gesture. (#186)
+                                                longPressJob.cancel()
+                                                callbackLongPressJob?.cancel()
+                                                gestureType = GestureType.Scroll
+                                            }
+                                        }
+                                        // else: a right-click long-press already fired and was
+                                        // consumed — ignore the trailing drag.
+                                    }
+                                }
+
+                                // Handle based on gesture type
+                                when (gestureType) {
+                                    GestureType.Selection -> {
+                                        if (selectionManager.isSelecting) {
+                                            val dragCol =
+                                                (change.position.x / baseCharWidth).toInt()
+                                                    .coerceIn(0, screenState.snapshot.cols - 1)
+                                            val dragRow =
+                                                ((change.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
+                                                    .coerceIn(0, screenState.snapshot.rows - 1)
+
+                                            // Edge-zone extension. Two paths:
+                                            //  1. Mouse-mode (callback present) — forward
+                                            //     wheel events to the remote so e.g. tmux
+                                            //     copy-mode auto-scrolls and extends its
+                                            //     own selection.
+                                            //  2. Native (no callback) — scroll our own
+                                            //     viewport one line and shift the selection
+                                            //     anchor in lockstep so it stays on the
+                                            //     same logical content line. This is what
+                                            //     lets a drag-select extend off the top of
+                                            //     the viewport into scrollback (#94).
+                                            val relY = change.position.y /
+                                                (visibleViewportPx)
+                                            val nearTop = relY < EDGE_SCROLL_ZONE
+                                            val nearBottom = relY > 1f - EDGE_SCROLL_ZONE
+                                            val callbackHandled = if ((nearTop || nearBottom) && gestureCallback != null) {
+                                                gestureCallback.onScroll(dragCol, dragRow, nearTop)
+                                            } else {
+                                                false
+                                            }
+
+                                            if (!callbackHandled) {
+                                                if (nearTop && screenState.scrollbackPosition < screenState.snapshot.scrollback.size) {
+                                                    screenState.scrollBy(+1)
+                                                    selectionManager.shiftSelectionStartByRows(+1)
+                                                    coroutineScope.launch {
+                                                        scrollOffset.snapTo(
+                                                            screenState.scrollbackPosition * baseCharHeight,
+                                                        )
+                                                    }
+                                                } else if (nearBottom && screenState.scrollbackPosition > 0) {
+                                                    screenState.scrollBy(-1)
+                                                    selectionManager.shiftSelectionStartByRows(-1)
+                                                    coroutineScope.launch {
+                                                        scrollOffset.snapTo(
+                                                            screenState.scrollbackPosition * baseCharHeight,
+                                                        )
+                                                    }
+                                                }
+                                            }
+
+                                            selectionManager.updateSelection(
+                                                dragRow,
+                                                dragCol,
+                                            )
+                                            magnifierPosition = change.position
                                         }
                                     }
-                                } else if (gestureCallback == null) {
-                                    // Apply fling animation (only for non-callback scrollback)
-                                    val velocity = velocityTracker.calculateVelocity()
-                                    coroutineScope.launch {
-                                        var targetValue = scrollOffset.targetValue
-                                        scrollOffset.animateDecay(
-                                            initialVelocity = velocity.y,
-                                            animationSpec = splineBasedDecay(density)
-                                        ) {
-                                            targetValue = value.coerceIn(0f, maxScroll)
-                                            // Update terminal buffer during animation
+
+                                    GestureType.MouseDrag -> {
+                                        // Quantize motion to cell boundaries — the remote
+                                        // (tmux et al.) only cares about cell-resolution
+                                        // changes; sending per-pixel events would flood the
+                                        // wire and make tmux's selection-extension stutter.
+                                        val dragCol = (change.position.x / baseCharWidth).toInt()
+                                            .coerceIn(0, screenState.snapshot.cols - 1)
+                                        val dragRow = ((change.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
+                                            .coerceIn(0, screenState.snapshot.rows - 1)
+                                        if (dragCol != lastMouseDragCol || dragRow != lastMouseDragRow) {
+                                            gestureCallback?.onMouseDrag(dragCol, dragRow, MouseDragPhase.Move)
+                                            lastMouseDragCol = dragCol
+                                            lastMouseDragRow = dragRow
+                                        }
+                                        // Edge-zone wheel events: same shape as Selection's
+                                        // edge-scroll, so tmux's copy-mode auto-scroll +
+                                        // selection-extension fires when the finger reaches
+                                        // the top/bottom of the viewport.
+                                        if (gestureCallback != null) {
+                                            val relY = change.position.y /
+                                                (visibleViewportPx)
+                                            if (relY < EDGE_SCROLL_ZONE || relY > 1f - EDGE_SCROLL_ZONE) {
+                                                val scrollUp = relY < EDGE_SCROLL_ZONE
+                                                gestureCallback.onScroll(dragCol, dragRow, scrollUp)
+                                            }
+                                        }
+                                    }
+
+                                    GestureType.Scroll -> {
+                                        if (gestureCallback != null) {
+                                            // Quantized scroll: accumulate drag and fire
+                                            // callback for each SCROLL_THRESHOLD_PX crossed
+                                            accumulatedScrollY += dragAmount.y
+                                            while (kotlin.math.abs(accumulatedScrollY) >= SCROLL_THRESHOLD_PX) {
+                                                val draggedUp = accumulatedScrollY < 0
+                                                accumulatedScrollY += if (draggedUp) SCROLL_THRESHOLD_PX else -SCROLL_THRESHOLD_PX
+                                                // Natural scrolling: finger down = scroll up (older content)
+                                                val scrollUp = !draggedUp
+                                                val col = (change.position.x / baseCharWidth).toInt()
+                                                    .coerceIn(0, screenState.snapshot.cols - 1)
+                                                val row = ((change.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
+                                                    .coerceIn(0, screenState.snapshot.rows - 1)
+                                                val consumed = gestureCallback.onScroll(col, row, scrollUp)
+                                                if (!consumed) {
+                                                    // Callback didn't handle it — do scrollback
+                                                    val scrollDir = if (scrollUp) 1 else -1
+                                                    screenState.scrollBy(scrollDir)
+                                                    coroutineScope.launch {
+                                                        scrollOffset.snapTo(
+                                                            screenState.scrollbackPosition * baseCharHeight,
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            // No callback: smooth pixel-level scrollback
+                                            val newOffset = (scrollOffset.value + dragAmount.y)
+                                                .coerceIn(0f, maxScroll)
+                                            coroutineScope.launch {
+                                                scrollOffset.snapTo(newOffset)
+                                            }
+
+                                            // Update terminal buffer scrollback position
                                             val scrolledLines =
-                                                (targetValue / baseCharHeight).toInt()
+                                                (newOffset / baseCharHeight).toInt()
                                             screenState.scrollBy(scrolledLines - screenState.scrollbackPosition)
                                         }
+                                    }
 
-                                        // Snap to final clamped position.
-                                        // If we settled within 2 lines of the bottom, snap
-                                        // fully to 0 — prevents accidental micro-flicks from
-                                        // leaving the terminal stuck 1–2 lines scrolled up,
-                                        // which causes garbled display during animations.
-                                        val threshold = 2f * baseCharHeight
-                                        scrollOffset.snapTo(targetValue.coerceIn(0f, maxScroll))
-                                        if (targetValue <= threshold) {
-                                            screenState.scrollToBottom()
-                                            scrollOffset.snapTo(0f)
+                                    else -> {}
+                                }
+
+                                // Always consume on Main pass to prevent the
+                                // HorizontalPager's scrollable from intercepting
+                                // drags. Tab swiping still works because the
+                                // pagerSwipeOverride runs on Initial pass (before Main).
+                                change.consume()
+                            }
+
+                            // 6. Gesture ended - cleanup
+                            gestureEnded = true
+                            longPressJob.cancel()
+                            callbackLongPressJob?.cancel()
+                            edgeAutoScrollJob.cancel()
+                            when (gestureType) {
+                                GestureType.Scroll -> {
+                                    // Flush any remaining accumulated scroll that didn't
+                                    // reach the threshold — ensures small flicks register.
+                                    if (gestureCallback != null && kotlin.math.abs(accumulatedScrollY) > SCROLL_THRESHOLD_PX / 3f) {
+                                        val scrollUp = accumulatedScrollY > 0 // natural: positive drag = scroll up
+                                        val col = (down.position.x / baseCharWidth).toInt()
+                                            .coerceIn(0, screenState.snapshot.cols - 1)
+                                        val row = ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
+                                            .coerceIn(0, screenState.snapshot.rows - 1)
+                                        val consumed = gestureCallback.onScroll(col, row, scrollUp)
+                                        if (!consumed) {
+                                            val scrollDir = if (scrollUp) 1 else -1
+                                            screenState.scrollBy(scrollDir)
+                                            coroutineScope.launch {
+                                                scrollOffset.snapTo(
+                                                    screenState.scrollbackPosition * baseCharHeight,
+                                                )
+                                            }
+                                        }
+                                    } else if (gestureCallback == null) {
+                                        // Apply fling animation (only for non-callback scrollback)
+                                        val velocity = velocityTracker.calculateVelocity()
+                                        coroutineScope.launch {
+                                            var targetValue = scrollOffset.targetValue
+                                            scrollOffset.animateDecay(
+                                                initialVelocity = velocity.y,
+                                                animationSpec = splineBasedDecay(density),
+                                            ) {
+                                                targetValue = value.coerceIn(0f, maxScroll)
+                                                // Update terminal buffer during animation
+                                                val scrolledLines =
+                                                    (targetValue / baseCharHeight).toInt()
+                                                screenState.scrollBy(scrolledLines - screenState.scrollbackPosition)
+                                            }
+
+                                            // Snap to final clamped position.
+                                            // If we settled within 2 lines of the bottom, snap
+                                            // fully to 0 — prevents accidental micro-flicks from
+                                            // leaving the terminal stuck 1–2 lines scrolled up,
+                                            // which causes garbled display during animations.
+                                            val threshold = 2f * baseCharHeight
+                                            scrollOffset.snapTo(targetValue.coerceIn(0f, maxScroll))
+                                            if (targetValue <= threshold) {
+                                                screenState.scrollToBottom()
+                                                scrollOffset.snapTo(0f)
+                                            }
                                         }
                                     }
                                 }
-                            }
 
-                            GestureType.Selection -> {
-                                showMagnifier = false
-                                if (selectionManager.isSelecting) {
-                                    selectionManager.endSelection()
+                                GestureType.Selection -> {
+                                    showMagnifier = false
+                                    if (selectionManager.isSelecting) {
+                                        selectionManager.endSelection()
+                                    }
                                 }
-                            }
 
-                            GestureType.MouseDrag -> {
-                                // Use the last dispatched cell if we have one,
-                                // otherwise fall back to the current pointer
-                                // position (covers the rare release-without-move case).
-                                val endCol = if (lastMouseDragCol >= 0) lastMouseDragCol
-                                    else (down.position.x / baseCharWidth).toInt()
-                                        .coerceIn(0, screenState.snapshot.cols - 1)
-                                val endRow = if (lastMouseDragRow >= 0) lastMouseDragRow
-                                    else ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
-                                        .coerceIn(0, screenState.snapshot.rows - 1)
-                                gestureCallback?.onMouseDrag(endCol, endRow, MouseDragPhase.End)
-                            }
-
-                            GestureType.Undetermined -> {
-                                // No drag occurred — this is a tap
-                                if (isHorizontalDrag) {
-                                    // Horizontal swipe — not a tap (selection already
-                                    // cleared during classification above)
-                                } else if (inPinchCooldown) {
-                                    // Suppress accidental taps from pinch finger liftoff
-                                } else if (callbackLongPressFired) {
-                                    // A long-press fired (haptic given) but the finger
-                                    // lifted without dragging — it was a deliberate hold,
-                                    // not a tap. Any right-click was already sent in
-                                    // onLongPress; don't also emit a tap/click. (#186)
-                                } else if (selectionManager.mode != SelectionMode.NONE) {
-                                    selectionManager.clearSelection()
-                                } else {
-                                    val tapCol = (down.position.x / baseCharWidth).toInt()
-                                        .coerceIn(0, screenState.snapshot.cols - 1)
-                                    val tapRow = ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
-                                        .coerceIn(0, screenState.snapshot.rows - 1)
-
-                                    // Check hyperlinks first — they take priority over
-                                    // mouse mode callbacks so URLs are always tappable.
-                                    // Uses screen-state method which joins soft-wrapped
-                                    // lines for cross-line URL detection.
-                                    val hyperlinkUrl = screenState.getHyperlinkUrlAt(tapRow, tapCol)
-
-                                    if (hyperlinkUrl != null) {
-                                        onHyperlinkClick(hyperlinkUrl)
+                                GestureType.MouseDrag -> {
+                                    // Use the last dispatched cell if we have one,
+                                    // otherwise fall back to the current pointer
+                                    // position (covers the rare release-without-move case).
+                                    val endCol = if (lastMouseDragCol >= 0) {
+                                        lastMouseDragCol
                                     } else {
-                                        // Give callback chance to handle tap (mouse mode)
-                                        val callbackHandled = gestureCallback?.onTap(tapCol, tapRow) == true
+                                        (down.position.x / baseCharWidth).toInt()
+                                            .coerceIn(0, screenState.snapshot.cols - 1)
+                                    }
+                                    val endRow = if (lastMouseDragRow >= 0) {
+                                        lastMouseDragRow
+                                    } else {
+                                        ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
+                                            .coerceIn(0, screenState.snapshot.rows - 1)
+                                    }
+                                    gestureCallback?.onMouseDrag(endCol, endRow, MouseDragPhase.End)
+                                }
 
-                                        // Tap-to-position-cursor on an OSC 133 prompt input
-                                        // line: synthesise arrow-key dispatches so the
-                                        // shell's readline cursor lands at the tapped
-                                        // column. Only fires when not in mouse mode, the
-                                        // viewport is at the live bottom, and the cursor
-                                        // row's segments confirm we're between OSC 133;B
-                                        // and the next 133;D for that prompt. Focus still
-                                        // happens so the keyboard pops up for further
-                                        // typing; only the tap/double-tap callbacks are
-                                        // suppressed to avoid e.g. a fullscreen-toggle
-                                        // double-tap eating a quick double-click reposition.
-                                        val tapPositionedCursor = !callbackHandled &&
-                                            tapToPositionCursorOnPrompt &&
-                                            screenState.scrollbackPosition == 0 &&
-                                            dispatchTapToPositionCursor(
-                                                terminalEmulator,
-                                                screenState.snapshot,
-                                                tapRow,
-                                                tapCol,
-                                            )
+                                GestureType.Undetermined -> {
+                                    // No drag occurred — this is a tap
+                                    if (isHorizontalDrag) {
+                                        // Horizontal swipe — not a tap (selection already
+                                        // cleared during classification above)
+                                    } else if (inPinchCooldown) {
+                                        // Suppress accidental taps from pinch finger liftoff
+                                    } else if (callbackLongPressFired) {
+                                        // A long-press fired (haptic given) but the finger
+                                        // lifted without dragging — it was a deliberate hold,
+                                        // not a tap. Any right-click was already sent in
+                                        // onLongPress; don't also emit a tap/click. (#186)
+                                    } else if (selectionManager.mode != SelectionMode.NONE) {
+                                        selectionManager.clearSelection()
+                                    } else {
+                                        val tapCol = (down.position.x / baseCharWidth).toInt()
+                                            .coerceIn(0, screenState.snapshot.cols - 1)
+                                        val tapRow = ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
+                                            .coerceIn(0, screenState.snapshot.rows - 1)
 
-                                        if (!callbackHandled) {
-                                            if (keyboardEnabled) {
-                                                focusRequester.requestFocus()
-                                            }
-                                            if (!tapPositionedCursor) {
-                                                val now = System.currentTimeMillis()
-                                                if (now - lastTapTime < 300) {
-                                                    onTerminalDoubleTap()
-                                                    lastTapTime = 0L
-                                                } else {
-                                                    onTerminalTap()
-                                                    lastTapTime = now
+                                        // Check hyperlinks first — they take priority over
+                                        // mouse mode callbacks so URLs are always tappable.
+                                        // Uses screen-state method which joins soft-wrapped
+                                        // lines for cross-line URL detection.
+                                        val hyperlinkUrl = screenState.getHyperlinkUrlAt(
+                                            tapRow,
+                                            tapCol,
+                                            terminalEmulator.autoDetectUrls,
+                                        )
+
+                                        if (hyperlinkUrl != null) {
+                                            onHyperlinkClick(hyperlinkUrl)
+                                        } else {
+                                            // Give callback chance to handle tap (mouse mode)
+                                            val callbackHandled = gestureCallback?.onTap(tapCol, tapRow) == true
+
+                                            // Tap-to-position-cursor on an OSC 133 prompt input
+                                            // line: synthesise arrow-key dispatches so the
+                                            // shell's readline cursor lands at the tapped
+                                            // column. Only fires when not in mouse mode, the
+                                            // viewport is at the live bottom, and the cursor
+                                            // row's segments confirm we're between OSC 133;B
+                                            // and the next 133;D for that prompt. Focus still
+                                            // happens so the keyboard pops up for further
+                                            // typing; only the tap/double-tap callbacks are
+                                            // suppressed to avoid e.g. a fullscreen-toggle
+                                            // double-tap eating a quick double-click reposition.
+                                            val tapPositionedCursor = !callbackHandled &&
+                                                tapToPositionCursorOnPrompt &&
+                                                screenState.scrollbackPosition == 0 &&
+                                                dispatchTapToPositionCursor(
+                                                    terminalEmulator,
+                                                    screenState.snapshot,
+                                                    tapRow,
+                                                    tapCol,
+                                                )
+
+                                            if (!callbackHandled) {
+                                                if (keyboardEnabled) {
+                                                    focusRequester.requestFocus()
+                                                }
+                                                if (!tapPositionedCursor) {
+                                                    val now = System.currentTimeMillis()
+                                                    if (now - lastTapTime < 300) {
+                                                        onTerminalDoubleTap()
+                                                        lastTapTime = 0L
+                                                    } else {
+                                                        onTerminalTap()
+                                                        lastTapTime = now
+                                                    }
                                                 }
                                             }
                                         }
                                     }
+                                    // Record tap for double-tap detection
+                                    tapTracker.lastTimestamp = down.uptimeMillis
+                                    tapTracker.lastPosition = down.position
                                 }
-                                // Record tap for double-tap detection
-                                tapTracker.lastTimestamp = down.uptimeMillis
-                                tapTracker.lastPosition = down.position
-                            }
 
-                            else -> {}
+                                else -> {}
+                            }
                         }
                     }
-                }
-            },
+                },
         ) {
             Canvas(
                 modifier = Modifier
@@ -2068,8 +2093,11 @@ internal fun TerminalWithAccessibility(
                 // host renders behind the Canvas (e.g. the device wallpaper via
                 // a translucent window). Cell-coloured backgrounds stay opaque.
                 drawRect(
-                    color = if (backgroundOpacity >= 1f) backgroundColor
-                        else backgroundColor.copy(alpha = backgroundOpacity),
+                    color = if (backgroundOpacity >= 1f) {
+                        backgroundColor
+                    } else {
+                        backgroundColor.copy(alpha = backgroundOpacity)
+                    },
                     size = size,
                 )
 
@@ -2090,10 +2118,12 @@ internal fun TerminalWithAccessibility(
                     if (prev.isNotEmpty() && curText.isNotEmpty() &&
                         prev.last().isUrlSafe() &&
                         curText[0] != ' ' && curText[0] != '\t' &&
-                        curText[0].isUrlSafe()) {
+                        curText[0].isUrlSafe()
+                    ) {
                         // Check that the chain traces back to a line with an actual URL
                         if ((row - 1) in urlContinuationRows ||
-                            screenState.getVisibleLine(row - 1).autoDetectedUrls.isNotEmpty()) {
+                            screenState.getVisibleLine(row - 1).autoDetectedUrls.isNotEmpty()
+                        ) {
                             urlContinuationRows.add(row)
                         }
                     }
@@ -2107,119 +2137,121 @@ internal fun TerminalWithAccessibility(
                 // back (see keyboardCoveredPx). 0 when the keyboard is hidden,
                 // so this is a no-op then. (#206)
                 translate(top = -keyboardCoveredPx) {
-                // Draw each line
-                for (row in 0 until screenState.snapshot.rows) {
-                    val line = screenState.getVisibleLine(row)
-                    // For URL continuation rows, compute where the URL-safe
-                    // prefix ends: skip leading spaces, then find the first
-                    // space after URL-safe content.
-                    val urlEndCol = if (row in urlContinuationRows) {
-                        val cells = line.cells
-                        var i = 0
-                        // Skip leading spaces (left margin padding)
-                        while (i < cells.size && cells[i].char == ' ') i++
-                        // Advance through URL-safe characters
-                        while (i < cells.size && cells[i].char.isUrlSafe()) i++
-                        i
-                    } else 0
-                    drawLine(
-                        line = line,
-                        row = row,
-                        isUrlContinuation = row in urlContinuationRows,
-                        urlContinuationEndCol = urlEndCol,
-                        charWidth = baseCharWidth,
-                        charHeight = baseCharHeight,
-                        charBaseline = baseCharBaseline,
-                        textPaint = textPaint,
-                        defaultFg = foregroundColor,
-                        defaultBg = backgroundColor,
-                        selectionManager = selectionManager,
-                        autoDetectUrls = terminalEmulator.autoDetectUrls,
-                        selectionBackgroundColor = selectionBackgroundColor,
-                        selectionForegroundColor = selectionForegroundColor,
-                    )
-                }
-
-                // Draw cursor (only when viewing current screen, not scrollback)
-                if (screenState.snapshot.cursorVisible && screenState.scrollbackPosition == 0 && cursorBlinkVisible) {
-                    drawCursor(
-                        row = screenState.snapshot.cursorRow,
-                        col = screenState.snapshot.cursorCol,
-                        charWidth = baseCharWidth,
-                        charHeight = baseCharHeight,
-                        foregroundColor = foregroundColor,
-                        backgroundColor = backgroundColor,
-                        cursorShape = screenState.snapshot.cursorShape,
-                        pendingDeadChar = composeController.pendingDeadChar,
-                        charBaseline = baseCharBaseline,
-                        textPaint = textPaint,
-                    )
-                }
-
-                // Draw compose mode overlay. The accumulated buffer and the
-                // in-flight IME composition render as ONE run — they used to be
-                // two overlays anchored at the same cursor cell, so while an
-                // IME held a live composition (HeliBoard composes every word)
-                // the current word overpainted the buffered ones and the
-                // overlay appeared to "erase" earlier words until Enter.
-                // Gboard commits words quickly, which is why it looked fine
-                // there.
-                if (composeMode.isActive && screenState.scrollbackPosition == 0) {
-                    drawComposeOverlay(
-                        buffer = composeMode.buffer + imeComposerText,
-                        cursorRow = screenState.snapshot.cursorRow,
-                        cursorCol = screenState.snapshot.cursorCol,
-                        totalCols = screenState.snapshot.cols,
-                        charWidth = baseCharWidth,
-                        charHeight = baseCharHeight,
-                        charBaseline = baseCharBaseline,
-                        textPaint = textPaint,
-                    )
-                }
-
-                // Draw IME composer overlay (romaji/pinyin etc. mid-composition).
-                // Rendered at the cursor; the remote shell sees nothing until the
-                // IME calls commitText() with the final selection. In compose
-                // mode the live composition is already folded into the compose
-                // overlay above.
-                if (!composeMode.isActive && imeComposerText.isNotEmpty() && screenState.scrollbackPosition == 0) {
-                    drawImeComposerOverlay(
-                        text = imeComposerText,
-                        cursorRow = screenState.snapshot.cursorRow,
-                        cursorCol = screenState.snapshot.cursorCol,
-                        totalCols = screenState.snapshot.cols,
-                        charWidth = baseCharWidth,
-                        charHeight = baseCharHeight,
-                        charBaseline = baseCharBaseline,
-                        textPaint = textPaint
-                    )
-                }
-
-                // Draw selection handles
-                if (selectionManager.mode != SelectionMode.NONE && !selectionManager.isSelecting) {
-                    val range = selectionManager.selectionRange
-                    if (range != null) {
-                        // Start handle
-                        val startPosition = range.getStartPosition()
-                        drawSelectionHandle(
-                            row = startPosition.first,
-                            col = startPosition.second,
+                    // Draw each line
+                    for (row in 0 until screenState.snapshot.rows) {
+                        val line = screenState.getVisibleLine(row)
+                        // For URL continuation rows, compute where the URL-safe
+                        // prefix ends: skip leading spaces, then find the first
+                        // space after URL-safe content.
+                        val urlEndCol = if (row in urlContinuationRows) {
+                            val cells = line.cells
+                            var i = 0
+                            // Skip leading spaces (left margin padding)
+                            while (i < cells.size && cells[i].char == ' ') i++
+                            // Advance through URL-safe characters
+                            while (i < cells.size && cells[i].char.isUrlSafe()) i++
+                            i
+                        } else {
+                            0
+                        }
+                        drawLine(
+                            line = line,
+                            row = row,
+                            isUrlContinuation = row in urlContinuationRows,
+                            urlContinuationEndCol = urlEndCol,
                             charWidth = baseCharWidth,
                             charHeight = baseCharHeight,
-                            pointingDown = false,
-                        )
-
-                        // End handle
-                        val endPosition = range.getEndPosition()
-                        drawSelectionHandle(
-                            row = endPosition.first,
-                            col = endPosition.second,
-                            charWidth = baseCharWidth,
-                            charHeight = baseCharHeight,
-                            pointingDown = true,
+                            charBaseline = baseCharBaseline,
+                            textPaint = textPaint,
+                            defaultFg = foregroundColor,
+                            defaultBg = backgroundColor,
+                            selectionManager = selectionManager,
+                            autoDetectUrls = terminalEmulator.autoDetectUrls,
+                            selectionBackgroundColor = selectionBackgroundColor,
+                            selectionForegroundColor = selectionForegroundColor,
                         )
                     }
-                }
+
+                    // Draw cursor (only when viewing current screen, not scrollback)
+                    if (screenState.snapshot.cursorVisible && screenState.scrollbackPosition == 0 && cursorBlinkVisible) {
+                        drawCursor(
+                            row = screenState.snapshot.cursorRow,
+                            col = screenState.snapshot.cursorCol,
+                            charWidth = baseCharWidth,
+                            charHeight = baseCharHeight,
+                            foregroundColor = foregroundColor,
+                            backgroundColor = backgroundColor,
+                            cursorShape = screenState.snapshot.cursorShape,
+                            pendingDeadChar = composeController.pendingDeadChar,
+                            charBaseline = baseCharBaseline,
+                            textPaint = textPaint,
+                        )
+                    }
+
+                    // Draw compose mode overlay. The accumulated buffer and the
+                    // in-flight IME composition render as ONE run — they used to be
+                    // two overlays anchored at the same cursor cell, so while an
+                    // IME held a live composition (HeliBoard composes every word)
+                    // the current word overpainted the buffered ones and the
+                    // overlay appeared to "erase" earlier words until Enter.
+                    // Gboard commits words quickly, which is why it looked fine
+                    // there.
+                    if (composeMode.isActive && screenState.scrollbackPosition == 0) {
+                        drawComposeOverlay(
+                            buffer = composeMode.buffer + imeComposerText,
+                            cursorRow = screenState.snapshot.cursorRow,
+                            cursorCol = screenState.snapshot.cursorCol,
+                            totalCols = screenState.snapshot.cols,
+                            charWidth = baseCharWidth,
+                            charHeight = baseCharHeight,
+                            charBaseline = baseCharBaseline,
+                            textPaint = textPaint,
+                        )
+                    }
+
+                    // Draw IME composer overlay (romaji/pinyin etc. mid-composition).
+                    // Rendered at the cursor; the remote shell sees nothing until the
+                    // IME calls commitText() with the final selection. In compose
+                    // mode the live composition is already folded into the compose
+                    // overlay above.
+                    if (!composeMode.isActive && imeComposerText.isNotEmpty() && screenState.scrollbackPosition == 0) {
+                        drawImeComposerOverlay(
+                            text = imeComposerText,
+                            cursorRow = screenState.snapshot.cursorRow,
+                            cursorCol = screenState.snapshot.cursorCol,
+                            totalCols = screenState.snapshot.cols,
+                            charWidth = baseCharWidth,
+                            charHeight = baseCharHeight,
+                            charBaseline = baseCharBaseline,
+                            textPaint = textPaint,
+                        )
+                    }
+
+                    // Draw selection handles
+                    if (selectionManager.mode != SelectionMode.NONE && !selectionManager.isSelecting) {
+                        val range = selectionManager.selectionRange
+                        if (range != null) {
+                            // Start handle
+                            val startPosition = range.getStartPosition()
+                            drawSelectionHandle(
+                                row = startPosition.first,
+                                col = startPosition.second,
+                                charWidth = baseCharWidth,
+                                charHeight = baseCharHeight,
+                                pointingDown = false,
+                            )
+
+                            // End handle
+                            val endPosition = range.getEndPosition()
+                            drawSelectionHandle(
+                                row = endPosition.first,
+                                col = endPosition.second,
+                                charWidth = baseCharWidth,
+                                charHeight = baseCharHeight,
+                                pointingDown = true,
+                            )
+                        }
+                    }
                 } // end translate(top = -keyboardCoveredPx)
             }
 
@@ -2408,7 +2440,7 @@ internal fun TerminalWithAccessibility(
                             },
                             modifier = Modifier.size(COPY_BUTTON_SIZE),
                             containerColor = Color.White,
-                            contentColor = Color.Black
+                            contentColor = Color.Black,
                         ) {
                             Text("Paste", style = MaterialTheme.typography.labelSmall)
                         }
@@ -2714,8 +2746,7 @@ internal fun edgeScrollRowsPerTick(
  * to this one Boolean. A plain line-mode shell passes false, so a keyboard
  * toggle keeps the no-resize render-shift and never SIGWINCHes the shell.
  */
-internal fun shouldReflowToKeyboard(altScreen: Boolean, reflowOnKeyboard: Boolean): Boolean =
-    altScreen || reflowOnKeyboard
+internal fun shouldReflowToKeyboard(altScreen: Boolean, reflowOnKeyboard: Boolean): Boolean = altScreen || reflowOnKeyboard
 
 /**
  * Vertical distance (px) to translate the rendered grid UP so the bottom-most
@@ -2748,8 +2779,11 @@ internal fun keyboardCoveredShiftPx(
     availableHeight: Int,
 ): Float = when {
     covered <= 0f -> 0f
+
     altScreen -> 0f
+
     scrollbackPosition != 0 -> covered
+
     else -> {
         val anchorRow = maxOf(cursorRow, lastContentRow)
         val desired = ((anchorRow + 1) * charHeight) - availableHeight
@@ -3174,6 +3208,7 @@ private fun DrawScope.drawCursor(
  * Background color for the compose mode overlay.
  */
 private val COMPOSE_OVERLAY_BACKGROUND = Color(0xFF2E7D32).copy(alpha = 0.85f)
+
 // Distinct blue tint so the IME composer doesn't look identical to the
 // compose-key overlay — users can tell "romaji being converted" apart
 // from "compose key buffering".
@@ -3297,8 +3332,11 @@ private fun DrawScope.drawImeComposerOverlay(
         ) {
             endIndex--
         }
-        displayText = if (endIndex == 0) ellipsis
-        else ellipsis + text.substring(text.length - endIndex)
+        displayText = if (endIndex == 0) {
+            ellipsis
+        } else {
+            ellipsis + text.substring(text.length - endIndex)
+        }
         displayWidth = textPaint.measureText(displayText)
     } else {
         displayText = text

@@ -175,6 +175,57 @@ class KeyboardHandlerTest {
         assertEquals(3, inputProcessedCallCount)
     }
 
+    @Test
+    fun testOnInterceptKeyReturnsTruePreventsDispatch() {
+        val outputs = mutableListOf<ByteArray>()
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 24,
+            initialCols = 80,
+            onKeyboardInput = { data -> outputs.add(data.copyOf()) },
+        )
+        val handler = KeyboardHandler(emulator)
+        var interceptCalledCount = 0
+        handler.onInterceptKey = {
+            interceptCalledCount++
+            true
+        }
+        handler.onInputProcessed = { inputProcessedCallCount++ }
+
+        val handled = handler.onKeyEvent(createKeyEvent(Key.A, KeyEventType.KeyDown))
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+
+        assertTrue("Should return true when onInterceptKey returns true", handled)
+        assertEquals(1, interceptCalledCount)
+        assertEquals("onInputProcessed should not be called", 0, inputProcessedCallCount)
+        assertTrue("Terminal output should not be dispatched", outputs.isEmpty())
+    }
+
+    @Test
+    fun testOnInterceptKeyReturnsFalseAllowsDispatch() {
+        val outputs = mutableListOf<ByteArray>()
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 24,
+            initialCols = 80,
+            onKeyboardInput = { data -> outputs.add(data.copyOf()) },
+        )
+        val handler = KeyboardHandler(emulator)
+        var interceptCalledCount = 0
+        handler.onInterceptKey = {
+            interceptCalledCount++
+            false
+        }
+        handler.onInputProcessed = { inputProcessedCallCount++ }
+
+        val handled = handler.onKeyEvent(createKeyEvent(Key.A, KeyEventType.KeyDown))
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+
+        assertTrue("Should handle printable key normally when intercepted returns false", handled)
+        assertEquals(1, interceptCalledCount)
+        assertEquals("onInputProcessed should be called", 1, inputProcessedCallCount)
+        val received = outputs.flatMap { it.toList() }.toByteArray()
+        assertTrue("Terminal output should include 'a'", received.contains('a'.code.toByte()))
+    }
+
     // === DelKeyMode tests ===
 
     @Test
@@ -287,25 +338,85 @@ class KeyboardHandlerTest {
         val composeMode = ComposeMode()
         composeMode.activate()
         keyboardHandler.composeMode = composeMode
+        keyboardHandler.onInputProcessed = { inputProcessedCallCount++ }
 
         keyboardHandler.onKeyEvent(createKeyEvent(Key.A, KeyEventType.KeyDown))
         keyboardHandler.onKeyEvent(createKeyEvent(Key.B, KeyEventType.KeyDown))
         keyboardHandler.onKeyEvent(createKeyEvent(Key.Backspace, KeyEventType.KeyDown))
 
         assertEquals("a", composeMode.buffer)
+        // Backspace with non-empty buffer just edits the buffer; no terminal dispatch.
+        assertEquals(0, inputProcessedCallCount)
     }
 
     @Test
-    fun testComposeModeEscapeCancels() {
+    fun testComposeModeBackspacePassesThroughWhenBufferEmpty() {
         val composeMode = ComposeMode()
         composeMode.activate()
         keyboardHandler.composeMode = composeMode
+        keyboardHandler.onInputProcessed = { inputProcessedCallCount++ }
+
+        keyboardHandler.onKeyEvent(createKeyEvent(Key.Backspace, KeyEventType.KeyDown))
+
+        assertTrue(composeMode.isActive)
+        assertEquals("", composeMode.buffer)
+        // Backspace with empty buffer is dispatched to the terminal as a real Backspace.
+        assertEquals(1, inputProcessedCallCount)
+    }
+
+    @Test
+    fun testComposeModeBackspacePassthroughRespectsDelKeyModeBackspace() {
+        // When compose buffer is empty and DelKeyMode.Backspace is active, the pass-through
+        // Backspace must send ^H (0x08), not DEL (0x7f).
+        val outputs = mutableListOf<ByteArray>()
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 24,
+            initialCols = 80,
+            onKeyboardInput = { data -> outputs.add(data.copyOf()) },
+        )
+        val handler = KeyboardHandler(emulator)
+        handler.delKeyMode = DelKeyMode.Backspace
+        val composeMode = ComposeMode()
+        composeMode.activate()
+        handler.composeMode = composeMode
+
+        handler.onKeyEvent(createKeyEvent(Key.Backspace, KeyEventType.KeyDown))
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+
+        val received = outputs.flatMap { it.toList() }.toByteArray()
+        assertTrue("Expected ^H (0x08) in Backspace mode", received.contains(0x08.toByte()))
+        assertFalse("Should NOT send DEL (0x7f) in Backspace mode", received.contains(0x7F.toByte()))
+    }
+
+    @Test
+    fun testComposeModeEscapeCancelsCompositionInProgress() {
+        val composeMode = ComposeMode()
+        composeMode.activate()
+        keyboardHandler.composeMode = composeMode
+        keyboardHandler.onInputProcessed = { inputProcessedCallCount++ }
 
         keyboardHandler.onKeyEvent(createKeyEvent(Key.A, KeyEventType.KeyDown))
         keyboardHandler.onKeyEvent(createKeyEvent(Key.Escape, KeyEventType.KeyDown))
 
-        assertFalse(composeMode.isActive)
+        assertTrue(composeMode.isActive)
         assertEquals("", composeMode.buffer)
+        // Esc with non-empty buffer just cancels the composition; no terminal dispatch.
+        assertEquals(0, inputProcessedCallCount)
+    }
+
+    @Test
+    fun testComposeModeEscapePassesThroughWhenBufferEmpty() {
+        val composeMode = ComposeMode()
+        composeMode.activate()
+        keyboardHandler.composeMode = composeMode
+        keyboardHandler.onInputProcessed = { inputProcessedCallCount++ }
+
+        keyboardHandler.onKeyEvent(createKeyEvent(Key.Escape, KeyEventType.KeyDown))
+
+        assertTrue(composeMode.isActive)
+        assertEquals("", composeMode.buffer)
+        // Esc with empty buffer is dispatched to the terminal as a real Escape key.
+        assertEquals(1, inputProcessedCallCount)
     }
 
     @Test
@@ -319,7 +430,8 @@ class KeyboardHandlerTest {
         keyboardHandler.onKeyEvent(createKeyEvent(Key.B, KeyEventType.KeyDown))
         keyboardHandler.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown))
 
-        assertFalse(composeMode.isActive)
+        assertTrue(composeMode.isActive)
+        assertEquals("", composeMode.buffer)
         assertEquals(1, inputProcessedCallCount)
     }
 
@@ -369,7 +481,9 @@ class KeyboardHandlerTest {
 
         val received = outputs.flatMap { it.toList() }.toByteArray().toString(Charsets.UTF_8)
         assertEquals("\r", received)
-        assertFalse("compose deactivates on commit", composeMode.isActive)
+        // Sticky compose (upstream 6d0f33a): Enter commits the line but the
+        // mode stays active until the user toggles it off.
+        assertTrue("compose stays active across Enter", composeMode.isActive)
     }
 
     @Test
@@ -803,6 +917,70 @@ class KeyboardHandlerTest {
             lookup = fakeLargeDeadKeyLookup,
         )
         assertEquals(String(Character.toChars(largeAccent)) + "b", output)
+    }
+
+    // === Newline (0x0A) handling tests ===
+
+    private fun collectCharacterOutput(block: (KeyboardHandler) -> Unit): ByteArray {
+        val outputs = mutableListOf<ByteArray>()
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 24,
+            initialCols = 80,
+            onKeyboardInput = { data -> outputs.add(data.copyOf()) },
+        )
+        val handler = KeyboardHandler(emulator)
+        block(handler)
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        return outputs.flatMap { it.toList() }.toByteArray()
+    }
+
+    @Test
+    fun testCharacterInputNewlineWithoutCtrlSendsEnter() {
+        // '\n' from keyboard (no ctrl) → VTermKey.ENTER, same as pressing the Enter key
+        val withEnterKey = collectCharacterOutput { it.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown)) }
+        val withNewline = collectCharacterOutput { it.onCharacterInput('\n', ctrl = false) }
+        assertEquals(withEnterKey.toList(), withNewline.toList())
+    }
+
+    @Test
+    fun testCharacterInputNewlineWithCtrlSendsCtrlEnter() {
+        // '\n' with ctrl → dispatchKey(CTRL, VTermKey.ENTER), not raw LF (0x0A)
+        val received = collectCharacterOutput { it.onCharacterInput('\n', ctrl = true) }
+        assertFalse("Ctrl+newline should not send bare LF (0x0A)", received.contentEquals(byteArrayOf(0x0A)))
+        assertTrue("Ctrl+newline should produce output", received.isNotEmpty())
+    }
+
+    @Test
+    fun testTextInputNewlineWithoutStickyCtrlSendsEnter() {
+        // '\n' in text input (no sticky ctrl) → VTermKey.ENTER, same as pressing the Enter key
+        val withEnterKey = collectCharacterOutput { it.onKeyEvent(createKeyEvent(Key.Enter, KeyEventType.KeyDown)) }
+        val withNewline = collectCharacterOutput { it.onTextInput("\n".toByteArray(Charsets.UTF_8)) }
+        assertEquals(withEnterKey.toList(), withNewline.toList())
+    }
+
+    @Test
+    fun testTextInputNewlineWithStickyCtrlSendsCtrlEnter() {
+        val outputs = mutableListOf<ByteArray>()
+        val emulator = TerminalEmulatorFactory.create(
+            initialRows = 24,
+            initialCols = 80,
+            onKeyboardInput = { data -> outputs.add(data.copyOf()) },
+        )
+        val modifierManager = object : ModifierManager {
+            override fun isCtrlActive() = true
+            override fun isAltActive() = false
+            override fun isShiftActive() = false
+            override fun clearTransients() {}
+        }
+        val handler = KeyboardHandler(emulator, modifierManager = modifierManager)
+
+        handler.onTextInput("\n".toByteArray(Charsets.UTF_8))
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+
+        // With sticky Ctrl active, '\n' → dispatchKey(CTRL, ENTER), NOT raw 0x0A
+        val received = outputs.flatMap { it.toList() }.toByteArray()
+        assertFalse("Sticky Ctrl+newline should not send bare LF", received.contentEquals(byteArrayOf(0x0A)))
+        assertTrue("Sticky Ctrl+newline should produce output", received.isNotEmpty())
     }
 
     private fun keyToAndroidKeyCode(key: Key): Int = when (key) {
