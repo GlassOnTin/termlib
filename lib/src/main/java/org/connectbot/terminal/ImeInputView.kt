@@ -23,6 +23,8 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedText
+import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -141,6 +143,10 @@ internal class ImeInputView(
     }
 
     private val restartImeRunnable = Runnable {
+        // #298 diagnostics: this is the line-boundary IME reset. If a captured
+        // trace shows the IME re-reading the old line right AFTER this fires,
+        // restartInput() (restarting=true) didn't drop its context.
+        Log.d(TAG, "restartImeAtLineBoundary -> restartInput()")
         _composingText.value = ""
         inputMethodManager.restartInput(this)
     }
@@ -595,6 +601,41 @@ internal class ImeInputView(
             notifyImeSelection()
             return true
         }
+
+        // #298 diagnostics: log the IME's *reads* of the field, not just its
+        // writes. Prediction-heavy IMEs (SwiftKey) rebuild their word/composition
+        // context by reading back the text around the cursor — if these return
+        // stale content after an Enter (rather than empty), the IME re-offers the
+        // executed line and the next word accretes onto it. The write-side trace
+        // (setComposingText/commitText/sendKeyEvent) never showed this; these
+        // overlays make a captured logcat (tag ImeInputView) reveal exactly what
+        // the IME saw. Pure delegation to super — no behaviour change.
+        override fun getTextBeforeCursor(n: Int, flags: Int): CharSequence? {
+            val r = super.getTextBeforeCursor(n, flags)
+            Log.d(TAG, "getTextBeforeCursor(n=$n) -> ${quoteForLog(r)}")
+            return r
+        }
+
+        override fun getTextAfterCursor(n: Int, flags: Int): CharSequence? {
+            val r = super.getTextAfterCursor(n, flags)
+            Log.d(TAG, "getTextAfterCursor(n=$n) -> ${quoteForLog(r)}")
+            return r
+        }
+
+        override fun getSelectedText(flags: Int): CharSequence? {
+            val r = super.getSelectedText(flags)
+            Log.d(TAG, "getSelectedText() -> ${quoteForLog(r)}")
+            return r
+        }
+
+        override fun getExtractedText(request: ExtractedTextRequest?, flags: Int): ExtractedText? {
+            val r = super.getExtractedText(request, flags)
+            Log.d(TAG, "getExtractedText(flags=$flags) -> ${quoteForLog(r?.text)}")
+            return r
+        }
+
+        private fun quoteForLog(cs: CharSequence?): String =
+            cs?.toString()?.take(40)?.let { "\"$it\" (len=${cs.length})" } ?: "null"
 
         override fun deleteSurroundingText(leftLength: Int, rightLength: Int): Boolean {
             Log.d(
