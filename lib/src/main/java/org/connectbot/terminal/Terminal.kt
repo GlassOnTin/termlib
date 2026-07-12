@@ -823,7 +823,15 @@ internal fun TerminalWithAccessibility(
             }
 
             override fun stopComposeMode() {
-                composeMode.cancel()
+                // Flush any in-flight IME composition into the terminal before leaving
+                // compose mode, so the user's typing isn't silently dropped on toggle off.
+                // cancel() only clears the buffer and stays in compose mode (that's the
+                // Escape behaviour); the explicit toggle-off must go through deactivate()
+                // — upstream 6d0f33a, dropped in the 0.1.1 merge (Haven #378).
+                composeMode.commit()?.codePoints()?.forEach { codepoint ->
+                    terminalEmulator.dispatchCharacter(0, codepoint)
+                }
+                composeMode.deactivate()
             }
 
             override fun toggleComposeMode() {
