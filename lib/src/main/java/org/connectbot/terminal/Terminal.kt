@@ -85,6 +85,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
@@ -1327,6 +1328,54 @@ internal fun TerminalWithAccessibility(
                 }
                 )
                 .onGloballyPositioned { contentOriginInRoot = it.positionInRoot() }
+                // Hardware mouse wheel. It needs its own handler: a wheel event
+                // carries no pressed pointer, so the gesture loop below — which
+                // opens with awaitFirstDown() — never wakes for one, and the
+                // wheel was simply dead (a click-drag worked, because that does
+                // produce a down). Each notch is routed through the SAME
+                // onScroll callback a swipe uses, so the host keeps making the
+                // decision: forward to a mouse-tracking app (tmux/vim/less),
+                // send arrow keys on the alt screen, or fall through to our own
+                // scrollback here.
+                .pointerInput(terminalEmulator, gestureCallback) {
+                    val baseCharWidth by currentCharWidth
+                    val baseCharHeight by currentCharHeight
+                    val notches = WheelNotchAccumulator()
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Main)
+                            if (event.type != PointerEventType.Scroll) continue
+                            val change = event.changes.firstOrNull() ?: continue
+                            val steps = notches.feed(change.scrollDelta.y)
+                            // Consume even a banked fraction, so a high-res wheel
+                            // can't also drive an ancestor scroller.
+                            change.consume()
+                            if (steps == 0) continue
+
+                            val col = (change.position.x / baseCharWidth).toInt()
+                                .coerceIn(0, screenState.snapshot.cols - 1)
+                            val row = ((change.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
+                                .coerceIn(0, screenState.snapshot.rows - 1)
+                            val scrollUp = steps > 0
+
+                            repeat(kotlin.math.abs(steps)) {
+                                // One wheel report per notch — xterm semantics; the
+                                // remote app decides how far that scrolls.
+                                val consumed = gestureCallback?.onScroll(col, row, scrollUp) ?: false
+                                if (!consumed) {
+                                    screenState.scrollBy(
+                                        if (scrollUp) WHEEL_SCROLLBACK_ROWS else -WHEEL_SCROLLBACK_ROWS,
+                                    )
+                                    coroutineScope.launch {
+                                        scrollOffset.snapTo(
+                                            screenState.scrollbackPosition * baseCharHeight,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 .pointerInput(terminalEmulator, gestureCallback) {
                     // Shadow the composition-scope metrics with fresh State reads:
                     // this block's closure outlives any pinch-zoom font change.
