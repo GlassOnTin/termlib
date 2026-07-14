@@ -17,6 +17,7 @@
 package org.connectbot.terminal
 
 import android.content.Context
+import android.text.Editable
 import android.text.Selection
 import android.util.Log
 import android.view.KeyEvent
@@ -247,9 +248,10 @@ internal class ImeInputView(
         if (isComposeModeActive) {
             // Compose mode: allow voice input and IME suggestions.
             // TYPE_CLASS_TEXT without NO_SUGGESTIONS keeps the suggestion strip (and its
-            // microphone button) visible. fullEditor=true makes BaseInputConnection provide
-            // a real Editable so getExtractedText() returns non-null (required by Gboard
-            // for voice input).
+            // microphone button) visible. fullEditor=true gives BaseInputConnection a real
+            // Editable — which is what our getExtractedText() reports from. (It does NOT
+            // make BaseInputConnection's own getExtractedText() non-null: that one always
+            // returns null, which is what #298 turned out to be.)
             outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT
             outAttrs.initialSelStart = 0
             outAttrs.initialSelEnd = 0
@@ -389,7 +391,25 @@ internal class ImeInputView(
                 getComposingSpanStart(ed),
                 getComposingSpanEnd(ed),
             )
+            // An IME that asked to watch the document (GET_EXTRACTED_TEXT_MONITOR) is
+            // entitled to be told when it changes. Answering the first request and then
+            // going silent leaves it with a stale mirror — the same failure as never
+            // answering at all, which is what #298 was. (#298)
+            if (extractedTextToken >= 0) {
+                inputMethodManager.updateExtractedText(
+                    this@ImeInputView,
+                    extractedTextToken,
+                    buildExtractedText(ed),
+                )
+            }
         }
+
+        /**
+         * Token from the IME's [InputConnection.GET_EXTRACTED_TEXT_MONITOR] request,
+         * or -1 if it never asked to watch. Lives on this connection, so a
+         * `restartInput` (new connection) forgets it, as it should.
+         */
+        private var extractedTextToken: Int = -1
 
         /**
          * Number of chars the IME has asked us (via [setComposingRegion])
@@ -628,10 +648,52 @@ internal class ImeInputView(
             return r
         }
 
+        /**
+         * Hand the IME the document. [BaseInputConnection] never implements this —
+         * it returns null whatever `fullEditor` says (agross's #298 trace: every
+         * call logs `fullEditor=true` and `-> null`).
+         *
+         * That is a contract we were breaking on both ends. In Standard mode we
+         * deliberately omit `IME_FLAG_NO_EXTRACT_UI` and set `AUTO_CORRECT` — we
+         * advertise a rich-editing field — and then refused to say what was in it.
+         * A prediction IME that mirrors the editor through ExtractedText (SwiftKey
+         * polls it after *every* edit) is left with nothing but its own model of
+         * the document, and that model is not reset by `restartInput`,
+         * `updateSelection(-1, -1)` or an empty `getTextBeforeCursor` — the trace
+         * shows Haven doing all three and SwiftKey composing over the executed line
+         * regardless, so a second `ls` reaches the shell as `lsls` and it accretes
+         * from there.
+         *
+         * We own the Editable. Report it. (#298)
+         */
         override fun getExtractedText(request: ExtractedTextRequest?, flags: Int): ExtractedText? {
-            val r = super.getExtractedText(request, flags)
-            Log.d(TAG, "getExtractedText(flags=$flags) -> ${quoteForLog(r?.text)}")
-            return r
+            val ed = editable
+            if (!fullEditor || ed == null) {
+                Log.d(TAG, "getExtractedText(flags=$flags) -> null (fullEditor=$fullEditor)")
+                return null
+            }
+            if (request != null && (flags and InputConnection.GET_EXTRACTED_TEXT_MONITOR) != 0) {
+                extractedTextToken = request.token
+            }
+            val extracted = buildExtractedText(ed)
+            Log.d(
+                TAG,
+                "getExtractedText(flags=$flags) -> ${quoteForLog(extracted.text)}" +
+                    " sel=${extracted.selectionStart}..${extracted.selectionEnd}" +
+                    " monitor=${extractedTextToken >= 0}",
+            )
+            return extracted
+        }
+
+        /** Snapshot of [ed] in the shape the IME expects. */
+        private fun buildExtractedText(ed: Editable): ExtractedText = ExtractedText().apply {
+            text = ed.toString()
+            startOffset = 0
+            partialStartOffset = -1
+            partialEndOffset = -1
+            selectionStart = Selection.getSelectionStart(ed).coerceAtLeast(0)
+            selectionEnd = Selection.getSelectionEnd(ed).coerceAtLeast(0)
+            flags = 0
         }
 
         private fun quoteForLog(cs: CharSequence?): String =

@@ -21,12 +21,15 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -72,6 +75,57 @@ class ImeInputViewTest {
     private fun ImeInputView.ic(composeMode: Boolean = false): BaseInputConnection {
         isComposeModeActive = composeMode
         return onCreateInputConnection(EditorInfo()) as BaseInputConnection
+    }
+
+    private fun ImeInputView.standardIc(): BaseInputConnection {
+        allowStandardKeyboard = true
+        return onCreateInputConnection(EditorInfo()) as BaseInputConnection
+    }
+
+    // === #298: the IME must be able to READ the document ===
+    //
+    // BaseInputConnection.getExtractedText() always returns null. In Standard mode we
+    // advertise a rich-editing field (no NO_EXTRACT_UI, AUTO_CORRECT set), so a
+    // prediction IME that mirrors the editor through ExtractedText — SwiftKey polls it
+    // after every edit — got nothing back and fell through to its own model of the
+    // document, which no restartInput/updateSelection/getTextBeforeCursor resets. It
+    // then kept composing over the already-executed line: a second `ls` arrived as
+    // `lsls`, and it accreted from there (agross's trace).
+
+    @Test
+    fun testGetExtractedTextReportsTheDocumentInStandardMode() {
+        val ic = makeView().standardIc()
+        ic.commitText("ls", 1)
+
+        val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+
+        assertNotNull("null strands an IME that mirrors the doc via ExtractedText", extracted)
+        assertEquals("ls", extracted!!.text.toString())
+        assertEquals(2, extracted.selectionStart)
+        assertEquals(2, extracted.selectionEnd)
+    }
+
+    @Test
+    fun testGetExtractedTextIsEmptyAfterEnter() {
+        val ic = makeView().standardIc()
+        ic.commitText("ls", 1)
+
+        ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+
+        // The executed line is gone. An IME reading the document now sees an empty
+        // field, so it has no basis to keep composing over `ls`.
+        val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+        assertEquals("", extracted?.text?.toString())
+        assertEquals(0, extracted?.selectionStart)
+    }
+
+    @Test
+    fun testGetExtractedTextStaysNullInSecureMode() {
+        // Secure mode has no real Editable and suppresses suggestions outright; there
+        // is no document to report and nothing that wants one.
+        val ic = makeView().ic()
+
+        assertNull(ic.getExtractedText(ExtractedTextRequest(), 0))
     }
 
     // === IME editable buffer reset on key events (compose mode — has a real Editable) ===
