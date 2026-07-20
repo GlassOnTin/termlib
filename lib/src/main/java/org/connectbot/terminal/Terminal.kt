@@ -105,10 +105,13 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.ScrollAxisRange
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.scrollBy
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.verticalScrollAxisRange
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
@@ -1328,6 +1331,33 @@ internal fun TerminalWithAccessibility(
                 }
                 )
                 .onGloballyPositioned { contentOriginInRoot = it.positionInRoot() }
+                // #419: advertise the terminal as vertically scrollable. Some
+                // OEM touchpad drivers (seen on OPPO/ColorOS) only route a
+                // two-finger touchpad scroll to a view that reports scroll
+                // semantics — the way a Compose list does — so without this the
+                // wheel/scroll handler below never receives the event even
+                // though the app's own lists scroll fine. The synthesised
+                // ACTION_SCROLL is still handled by the pointerInput below; the
+                // scrollBy action here is the accessibility-driven fallback and
+                // makes the terminal properly scrollable to TalkBack too.
+                .semantics {
+                    verticalScrollAxisRange = ScrollAxisRange(
+                        value = { screenState.scrollbackPosition.toFloat() },
+                        maxValue = { screenState.snapshot.scrollback.size.toFloat() },
+                        reverseScrolling = true,
+                    )
+                    scrollBy { _, y ->
+                        // Compose convention: +y scrolls toward the end (newer,
+                        // toward the bottom). Our scrollBy raises the scrollback
+                        // position to go back in history, so invert. Read the
+                        // char height through State so a pinch-zoom can't leave
+                        // this lambda mapping with stale metrics (see line ~700).
+                        val ch = currentCharHeight.value
+                        val lines = if (ch > 0f) (y / ch).toInt() else 0
+                        if (lines != 0) scrollController.scrollBy(-lines)
+                        true
+                    }
+                }
                 // Hardware mouse wheel. It needs its own handler: a wheel event
                 // carries no pressed pointer, so the gesture loop below — which
                 // opens with awaitFirstDown() — never wakes for one, and the
