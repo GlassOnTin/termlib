@@ -1406,6 +1406,30 @@ internal fun TerminalWithAccessibility(
                         }
                     }
                 }
+                // #419: a physical touchpad's two-finger scroll arrives on the
+                // *indirect* pointer channel, which the wheel pointerInput above
+                // never sees. Mirror its body so touchpad scroll drives scrollback
+                // (or forwards to a mouse-tracking app) identically.
+                .indirectVerticalScroll { steps, x, y ->
+                    val col = (x / currentCharWidth.value).toInt()
+                        .coerceIn(0, screenState.snapshot.cols - 1)
+                    val row = ((y + keyboardCoveredPx) / currentCharHeight.value).toInt()
+                        .coerceIn(0, screenState.snapshot.rows - 1)
+                    val scrollUp = steps > 0
+                    repeat(kotlin.math.abs(steps)) {
+                        val consumed = gestureCallback?.onScroll(col, row, scrollUp) ?: false
+                        if (!consumed) {
+                            screenState.scrollBy(
+                                if (scrollUp) WHEEL_SCROLLBACK_ROWS else -WHEEL_SCROLLBACK_ROWS,
+                            )
+                            coroutineScope.launch {
+                                scrollOffset.snapTo(
+                                    screenState.scrollbackPosition * currentCharHeight.value,
+                                )
+                            }
+                        }
+                    }
+                }
                 .pointerInput(terminalEmulator, gestureCallback) {
                     // Shadow the composition-scope metrics with fresh State reads:
                     // this block's closure outlives any pinch-zoom font change.
