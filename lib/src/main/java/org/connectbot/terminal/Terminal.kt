@@ -164,6 +164,30 @@ private const val WAIT_FOR_SECOND_TOUCH_MS = 40L
 private const val CALLBACK_LONG_PRESS_MS = 400L
 
 /**
+ * Extra grace before a press becomes a Haven text selection while the remote
+ * app has mouse mode on (#435).
+ *
+ * Long-press starts a local selection in every session, so tmux/zellij users
+ * keep the visible select-and-Copy workflow. The cost was that a *click* in a
+ * mouse-mode app had to beat the system long-press timeout: aiming carefully at
+ * a small target — a zellij tab, a tmux pane border — routinely takes longer
+ * than that, and the press was hijacked into a selection while the app never
+ * saw the click. Only quick taps got through, which is why this looked like it
+ * worked. Holding for this long instead still opens the copy workflow; a
+ * deliberate press-and-hold is unmistakably longer than a careful tap.
+ */
+private const val MOUSE_MODE_LONG_PRESS_MS = 900L
+
+/**
+ * How long a press must be held before it becomes a Haven text selection.
+ * [mouseMode] true means the remote app asked for the mouse, so clicks belong
+ * to it and the press gets [MOUSE_MODE_LONG_PRESS_MS] of grace; otherwise the
+ * platform's own timeout applies. Pure so the policy is testable (#435).
+ */
+internal fun longPressDelayMs(mouseMode: Boolean, systemLongPressMs: Long): Long =
+    if (mouseMode) MOUSE_MODE_LONG_PRESS_MS else systemLongPressMs
+
+/**
  * Millis after last multi-touch event to suppress tap from stale
  * finger lift-off after a pinch-to-zoom. Only blocks taps, not
  * long-press or drag gestures.
@@ -1595,7 +1619,17 @@ internal fun TerminalWithAccessibility(
                             val callbackLongPressJob: kotlinx.coroutines.Job? = null
 
                             val longPressJob = launch {
-                                delay(viewConfiguration.longPressTimeoutMillis)
+                                // #435: a mouse-mode app owns clicks, so give the
+                                // press longer before we steal it for a selection —
+                                // otherwise a careful tap on a zellij/tmux tab never
+                                // reaches the app. gestureCallback is non-null only
+                                // while the remote requested mouse mode.
+                                delay(
+                                    longPressDelayMs(
+                                        mouseMode = gestureCallback != null,
+                                        systemLongPressMs = viewConfiguration.longPressTimeoutMillis,
+                                    ),
+                                )
                                 // Haven-local text selection on long-press. Previously
                                 // gated to pure-terminal mode (no gestureCallback) so
                                 // the multiplexer could own mouse-mode selection via
