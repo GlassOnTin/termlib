@@ -88,6 +88,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.input.pointer.util.addPointerInputChange
@@ -768,6 +769,9 @@ internal fun TerminalWithAccessibility(
     val maxScroll = remember(screenState.snapshot.scrollback.size, baseCharHeight) {
         screenState.snapshot.scrollback.size * baseCharHeight
     }
+    // Mutable holder avoids recomposition for every indirect touchpad MOVE.
+    val indirectSwipeAccumY = remember(terminalEmulator) { floatArrayOf(0f) }
+    val interopTwoFingerLastY = remember(terminalEmulator) { floatArrayOf(Float.NaN) }
     LaunchedEffect(maxScroll) {
         scrollOffset.updateBounds(0f, maxScroll)
     }
@@ -1368,6 +1372,41 @@ internal fun TerminalWithAccessibility(
             },
         )
 
+        val handleClassifiedTwoFingerSwipe: (Float, Float, Float) -> Unit = { deltaY, x, y ->
+            if (deltaY == 0f) {
+                indirectSwipeAccumY[0] = 0f
+            } else if (gestureCallback != null) {
+                // Match the ordinary touch-drag path: turn physical travel into
+                // terminal wheel steps for tmux/vim/etc.
+                indirectSwipeAccumY[0] += deltaY
+                while (kotlin.math.abs(indirectSwipeAccumY[0]) >= SCROLL_THRESHOLD_PX) {
+                    val scrollUp = indirectSwipeAccumY[0] > 0
+                    indirectSwipeAccumY[0] +=
+                        if (scrollUp) -SCROLL_THRESHOLD_PX else SCROLL_THRESHOLD_PX
+                    val col = (x / currentCharWidth.value).toInt()
+                        .coerceIn(0, screenState.snapshot.cols - 1)
+                    val row = ((y + keyboardCoveredPx) / currentCharHeight.value).toInt()
+                        .coerceIn(0, screenState.snapshot.rows - 1)
+                    val consumed = gestureCallback.onScroll(col, row, scrollUp)
+                    if (!consumed) {
+                        screenState.scrollBy(if (scrollUp) 1 else -1)
+                        coroutineScope.launch {
+                            scrollOffset.snapTo(
+                                screenState.scrollbackPosition * currentCharHeight.value,
+                            )
+                        }
+                    }
+                }
+            } else {
+                // Local terminal scrollback remains pixel-smooth, exactly like
+                // a direct touch drag.
+                val newOffset = (scrollOffset.value + deltaY).coerceIn(0f, maxScroll)
+                coroutineScope.launch { scrollOffset.snapTo(newOffset) }
+                val lines = (newOffset / currentCharHeight.value).toInt()
+                screenState.scrollBy(lines - screenState.scrollbackPosition)
+            }
+        }
+
         // Draw terminal content with context menu overlay
         Box(
             modifier = (
@@ -1412,6 +1451,48 @@ internal fun TerminalWithAccessibility(
                         val lines = if (ch > 0f) (y / ch).toInt() else 0
                         if (lines != 0) scrollController.scrollBy(-lines)
                         true
+                    }
+                }
+                // ColorOS can deliver an official two-finger swipe through the
+                // host View's touch dispatcher while Compose excludes it from
+                // both ordinary pointerInput and the indirect pointer node.
+                // Read that raw stream before Compose re-classifies it.
+                .pointerInteropFilter { native ->
+                    val isTwoFingerSwipe =
+                        android.os.Build.VERSION.SDK_INT >= 29 &&
+                            native.classification == MotionEvent.CLASSIFICATION_TWO_FINGER_SWIPE
+                    if (!isTwoFingerSwipe) {
+                        false
+                    } else {
+                        when (native.actionMasked) {
+                            MotionEvent.ACTION_DOWN -> {
+                                interopTwoFingerLastY[0] = native.y
+                                handleClassifiedTwoFingerSwipe(0f, native.x, native.y)
+                                true
+                            }
+
+                            MotionEvent.ACTION_MOVE -> {
+                                val previousY = interopTwoFingerLastY[0]
+                                interopTwoFingerLastY[0] = native.y
+                                if (!previousY.isNaN()) {
+                                    handleClassifiedTwoFingerSwipe(
+                                        native.y - previousY,
+                                        native.x,
+                                        native.y,
+                                    )
+                                }
+                                true
+                            }
+
+                            MotionEvent.ACTION_UP,
+                            MotionEvent.ACTION_CANCEL,
+                            -> {
+                                interopTwoFingerLastY[0] = Float.NaN
+                                true
+                            }
+
+                            else -> false
+                        }
                     }
                 }
                 // Hardware mouse wheel. It needs its own handler: a wheel event
@@ -1466,26 +1547,31 @@ internal fun TerminalWithAccessibility(
                 // *indirect* pointer channel, which the wheel pointerInput above
                 // never sees. Mirror its body so touchpad scroll drives scrollback
                 // (or forwards to a mouse-tracking app) identically.
-                .indirectVerticalScroll { steps, x, y ->
-                    val col = (x / currentCharWidth.value).toInt()
-                        .coerceIn(0, screenState.snapshot.cols - 1)
-                    val row = ((y + keyboardCoveredPx) / currentCharHeight.value).toInt()
-                        .coerceIn(0, screenState.snapshot.rows - 1)
-                    val scrollUp = steps > 0
-                    repeat(kotlin.math.abs(steps)) {
-                        val consumed = gestureCallback?.onScroll(col, row, scrollUp) ?: false
-                        if (!consumed) {
-                            screenState.scrollBy(
-                                if (scrollUp) WHEEL_SCROLLBACK_ROWS else -WHEEL_SCROLLBACK_ROWS,
-                            )
-                            coroutineScope.launch {
-                                scrollOffset.snapTo(
-                                    screenState.scrollbackPosition * currentCharHeight.value,
+                .indirectVerticalScroll(
+                    onScrollNotches = { steps, x, y ->
+                        val col = (x / currentCharWidth.value).toInt()
+                            .coerceIn(0, screenState.snapshot.cols - 1)
+                        val row = ((y + keyboardCoveredPx) / currentCharHeight.value).toInt()
+                            .coerceIn(0, screenState.snapshot.rows - 1)
+                        val scrollUp = steps > 0
+                        repeat(kotlin.math.abs(steps)) {
+                            val consumed = gestureCallback?.onScroll(col, row, scrollUp) ?: false
+                            if (!consumed) {
+                                screenState.scrollBy(
+                                    if (scrollUp) WHEEL_SCROLLBACK_ROWS else -WHEEL_SCROLLBACK_ROWS,
                                 )
+                                coroutineScope.launch {
+                                    scrollOffset.snapTo(
+                                        screenState.scrollbackPosition * currentCharHeight.value,
+                                    )
+                                }
                             }
                         }
-                    }
-                }
+                    },
+                    onTwoFingerSwipe = { deltaY, x, y ->
+                        handleClassifiedTwoFingerSwipe(deltaY, x, y)
+                    },
+                )
                 .pointerInput(terminalEmulator, gestureCallback) {
                     // Shadow the composition-scope metrics with fresh State reads:
                     // this block's closure outlives any pinch-zoom font change.
