@@ -1,6 +1,7 @@
 package org.connectbot.terminal
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -57,5 +58,32 @@ class LongPressDelayTest {
     @Test
     fun `platform timeout is passed through, not clamped`() {
         assertEquals(1500L, longPressDelayMs(mouseMode = false, systemLongPressMs = 1500L))
+    }
+
+    /**
+     * Measured on-device: with a selection showing, two identical taps produced
+     * only one SGR click on the wire — the first was spent dismissing the
+     * selection. In a mouse-mode app that reads as "tapping does nothing",
+     * which is the state a stolen press leaves you in.
+     */
+    @Test
+    fun `a tap in mouse mode is delivered even when a selection is showing`() {
+        assertFalse(
+            "the app owns the click — dismissing Haven's selection must not consume it",
+            tapOnlyDismissesSelection(selectionActive = true, mouseMode = true),
+        )
+    }
+
+    /** Outside mouse mode nothing competes for the click, so dismissing is the gesture. */
+    @Test
+    fun `a tap outside mouse mode just dismisses the selection`() {
+        assertTrue(tapOnlyDismissesSelection(selectionActive = true, mouseMode = false))
+    }
+
+    /** With no selection showing there is nothing to dismiss, in either mode. */
+    @Test
+    fun `with no selection a tap is never spent dismissing`() {
+        assertFalse(tapOnlyDismissesSelection(selectionActive = false, mouseMode = false))
+        assertFalse(tapOnlyDismissesSelection(selectionActive = false, mouseMode = true))
     }
 }

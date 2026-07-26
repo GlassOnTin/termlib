@@ -188,6 +188,18 @@ internal fun longPressDelayMs(mouseMode: Boolean, systemLongPressMs: Long): Long
     if (mouseMode) MOUSE_MODE_LONG_PRESS_MS else systemLongPressMs
 
 /**
+ * Whether a tap landing while a selection is showing is spent dismissing that
+ * selection, instead of being delivered as a click as well (#435).
+ *
+ * True outside mouse mode: no remote app wants the click, so dismissing is the
+ * whole gesture. False while the app has mouse tracking on — there the click is
+ * the app's, and consuming it to close Haven's own selection UI makes taps look
+ * dead until the user taps a second time. Pure so the policy is testable.
+ */
+internal fun tapOnlyDismissesSelection(selectionActive: Boolean, mouseMode: Boolean): Boolean =
+    selectionActive && !mouseMode
+
+/**
  * Millis after last multi-touch event to suppress tap from stale
  * finger lift-off after a pinch-to-zoom. Only blocks taps, not
  * long-press or drag gestures.
@@ -574,6 +586,11 @@ internal fun TerminalWithAccessibility(
     // Remember updated callbacks to avoid stale lambdas inside pointerInput
     val currentOnTerminalTap by rememberUpdatedState(onTerminalTap)
     val currentOnHyperlinkClick by rememberUpdatedState(onHyperlinkClick)
+
+    // Read through a State so the gesture handler sees mode flips without
+    // being keyed on them: pointerInput only restarts on terminalEmulator /
+    // gestureCallback, so a captured Boolean would go stale. (#435)
+    val currentMouseModeActive by rememberUpdatedState(mouseModeActive)
 
     val density = LocalDensity.current
     val clipboardManager = LocalClipboardManager.current
@@ -1640,7 +1657,7 @@ internal fun TerminalWithAccessibility(
                                 // reaches the app.
                                 delay(
                                     longPressDelayMs(
-                                        mouseMode = mouseModeActive,
+                                        mouseMode = currentMouseModeActive,
                                         systemLongPressMs = viewConfiguration.longPressTimeoutMillis,
                                     ),
                                 )
@@ -2160,9 +2177,25 @@ internal fun TerminalWithAccessibility(
                                         // lifted without dragging — it was a deliberate hold,
                                         // not a tap. Any right-click was already sent in
                                         // onLongPress; don't also emit a tap/click. (#186)
-                                    } else if (selectionManager.mode != SelectionMode.NONE) {
+                                    } else if (tapOnlyDismissesSelection(
+                                            selectionActive = selectionManager.mode != SelectionMode.NONE,
+                                            mouseMode = currentMouseModeActive,
+                                        )
+                                    ) {
+                                        // Nothing else wants this click: dismissing the
+                                        // selection is the whole gesture.
                                         selectionManager.clearSelection()
                                     } else {
+                                        // In a mouse-mode app the click belongs to the
+                                        // remote, so a tap that lands while a selection
+                                        // happens to be showing must dismiss it *and*
+                                        // still be delivered. Swallowing it makes taps
+                                        // look dead until you tap a second time — which
+                                        // is exactly what a stolen press leaves you
+                                        // doing. (#435)
+                                        if (selectionManager.mode != SelectionMode.NONE) {
+                                            selectionManager.clearSelection()
+                                        }
                                         val tapCol = (down.position.x / baseCharWidth).toInt()
                                             .coerceIn(0, screenState.snapshot.cols - 1)
                                         val tapRow = ((down.position.y + keyboardCoveredPx) / baseCharHeight).toInt()
