@@ -446,6 +446,19 @@ fun Terminal(
      */
     onGestureInjectorReady: ((GestureInjector) -> Unit)? = null,
     /**
+     * True while the remote app has mouse tracking on (DECSET ?1000/?1002/
+     * ?1003) and Haven is forwarding taps to it as clicks. Clicks belong to the
+     * app, so a press gets [MOUSE_MODE_LONG_PRESS_MS] before Haven converts it
+     * into a local text selection (#435).
+     *
+     * Must be the real mouse-mode signal, not "a gestureCallback exists": a
+     * callback is also installed for alt-screen-only apps (vim, less, plain
+     * tmux) that forward *scroll* but not taps, and those have no click to
+     * protect — giving them the longer grace only makes selecting text feel
+     * broken.
+     */
+    mouseModeActive: Boolean = false,
+    /**
      * Host hint: reflow (resize the PTY to the keyboard-shrunk height,
      * SIGWINCH) on a soft-keyboard toggle, instead of keeping the row count
      * and render-shifting (#206). The alternate screen always reflows; this
@@ -497,6 +510,7 @@ fun Terminal(
         tapToPositionCursorOnPrompt = tapToPositionCursorOnPrompt,
         onGestureInjectorReady = onGestureInjectorReady,
         reflowOnKeyboard = reflowOnKeyboard,
+        mouseModeActive = mouseModeActive,
     )
 }
 
@@ -544,6 +558,7 @@ internal fun TerminalWithAccessibility(
     onGestureInjectorReady: ((GestureInjector) -> Unit)? = null,
     tapToPositionCursorOnPrompt: Boolean = false,
     reflowOnKeyboard: Boolean = false,
+    mouseModeActive: Boolean = false,
 ) {
     if (terminalEmulator !is TerminalEmulatorImpl) {
         Box(
@@ -1622,11 +1637,10 @@ internal fun TerminalWithAccessibility(
                                 // #435: a mouse-mode app owns clicks, so give the
                                 // press longer before we steal it for a selection —
                                 // otherwise a careful tap on a zellij/tmux tab never
-                                // reaches the app. gestureCallback is non-null only
-                                // while the remote requested mouse mode.
+                                // reaches the app.
                                 delay(
                                     longPressDelayMs(
-                                        mouseMode = gestureCallback != null,
+                                        mouseMode = mouseModeActive,
                                         systemLongPressMs = viewConfiguration.longPressTimeoutMillis,
                                     ),
                                 )
