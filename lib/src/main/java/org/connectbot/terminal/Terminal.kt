@@ -208,10 +208,24 @@ internal fun tapOnlyDismissesSelection(selectionActive: Boolean, mouseMode: Bool
 private const val MULTITOUCH_LIFTOFF_MS = 200L
 
 /**
- * Pixels of vertical drag accumulated before emitting one scroll callback event.
- * Lower values feel more responsive in TUI apps but send more escape sequences.
+ * Vertical drag accumulated before emitting one scroll callback event, in
+ * DENSITY-INDEPENDENT pixels. Lower values feel more responsive in TUI apps but
+ * send more escape sequences.
+ *
+ * This was a raw pixel count, which made scroll sensitivity depend on screen
+ * density: 24px is about 1.3mm of travel on a 3x phone but three times that on
+ * a 1x screen, so the same physical swipe sent a wildly different number of
+ * wheel events depending on the device (#421). 8dp is what 24px worked out to
+ * on a 3x display, so this is a no-op there and a correction everywhere else.
  */
-private const val SCROLL_THRESHOLD_PX = 24f
+private const val SCROLL_THRESHOLD_DP = 8f
+
+/**
+ * [SCROLL_THRESHOLD_DP] in pixels at the given display [density]. Pure so the
+ * density-scaling is testable — the bug it replaces was invisible precisely
+ * because a bare constant looks correct on whatever device you happen to hold.
+ */
+internal fun scrollThresholdPx(density: Float): Float = SCROLL_THRESHOLD_DP * density
 
 /**
  * Fraction of terminal height at top/bottom that triggers edge-scroll
@@ -594,6 +608,9 @@ internal fun TerminalWithAccessibility(
     val currentMouseModeActive by rememberUpdatedState(mouseModeActive)
 
     val density = LocalDensity.current
+    // Density-scaled once here; every scroll site below uses this, never a raw
+    // pixel count (#421).
+    val scrollThreshold = scrollThresholdPx(density.density)
     val clipboardManager = LocalClipboardManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val scope = rememberCoroutineScope()
@@ -1379,10 +1396,10 @@ internal fun TerminalWithAccessibility(
                 // Match the ordinary touch-drag path: turn physical travel into
                 // terminal wheel steps for tmux/vim/etc.
                 indirectSwipeAccumY[0] += deltaY
-                while (kotlin.math.abs(indirectSwipeAccumY[0]) >= SCROLL_THRESHOLD_PX) {
+                while (kotlin.math.abs(indirectSwipeAccumY[0]) >= scrollThreshold) {
                     val scrollUp = indirectSwipeAccumY[0] > 0
                     indirectSwipeAccumY[0] +=
-                        if (scrollUp) -SCROLL_THRESHOLD_PX else SCROLL_THRESHOLD_PX
+                        if (scrollUp) -scrollThreshold else scrollThreshold
                     val col = (x / currentCharWidth.value).toInt()
                         .coerceIn(0, screenState.snapshot.cols - 1)
                     val row = ((y + keyboardCoveredPx) / currentCharHeight.value).toInt()
@@ -2121,11 +2138,11 @@ internal fun TerminalWithAccessibility(
                                     GestureType.Scroll -> {
                                         if (gestureCallback != null) {
                                             // Quantized scroll: accumulate drag and fire
-                                            // callback for each SCROLL_THRESHOLD_PX crossed
+                                            // callback for each scrollThreshold crossed
                                             accumulatedScrollY += dragAmount.y
-                                            while (kotlin.math.abs(accumulatedScrollY) >= SCROLL_THRESHOLD_PX) {
+                                            while (kotlin.math.abs(accumulatedScrollY) >= scrollThreshold) {
                                                 val draggedUp = accumulatedScrollY < 0
-                                                accumulatedScrollY += if (draggedUp) SCROLL_THRESHOLD_PX else -SCROLL_THRESHOLD_PX
+                                                accumulatedScrollY += if (draggedUp) scrollThreshold else -scrollThreshold
                                                 // Natural scrolling: finger down = scroll up (older content)
                                                 val scrollUp = !draggedUp
                                                 val col = (change.position.x / baseCharWidth).toInt()
@@ -2178,7 +2195,7 @@ internal fun TerminalWithAccessibility(
                                 GestureType.Scroll -> {
                                     // Flush any remaining accumulated scroll that didn't
                                     // reach the threshold — ensures small flicks register.
-                                    if (gestureCallback != null && kotlin.math.abs(accumulatedScrollY) > SCROLL_THRESHOLD_PX / 3f) {
+                                    if (gestureCallback != null && kotlin.math.abs(accumulatedScrollY) > scrollThreshold / 3f) {
                                         val scrollUp = accumulatedScrollY > 0 // natural: positive drag = scroll up
                                         val col = (down.position.x / baseCharWidth).toInt()
                                             .coerceIn(0, screenState.snapshot.cols - 1)
