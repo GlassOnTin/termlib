@@ -201,6 +201,29 @@ internal fun tapOnlyDismissesSelection(selectionActive: Boolean, mouseMode: Bool
     selectionActive && !mouseMode
 
 /**
+ * One line per terminal gesture, tagged so a bug reporter can filter for it
+ * with `logcat -s HavenGesture` (#435).
+ *
+ * Exists because that report could not be reproduced from a description: a
+ * tap the user calls "as short as I can make it" starts a text selection on
+ * their device, while a synthetic click of the same length does not on mine.
+ * The disagreement is about what the touch stream actually contains, so this
+ * prints the measurements rather than asking anyone to estimate them: how
+ * long the press really lasted, how far it moved, what kind of pointer it
+ * was, and which threshold was in force.
+ */
+internal fun gestureLogLine(
+    outcome: String,
+    pressMs: Long,
+    thresholdMs: Long,
+    mouseMode: Boolean,
+    movedPx: Float,
+    touchSlopPx: Float,
+    pointerType: String,
+): String = "gesture=$outcome pressMs=$pressMs thresholdMs=$thresholdMs mouseMode=$mouseMode " +
+    "movedPx=${"%.1f".format(movedPx)} slopPx=${"%.1f".format(touchSlopPx)} pointer=$pointerType"
+
+/**
  * Millis after last multi-touch event to suppress tap from stale
  * finger lift-off after a pinch-to-zoom. Only blocks taps, not
  * long-press or drag gestures.
@@ -1752,6 +1775,30 @@ internal fun TerminalWithAccessibility(
                             // still reachable via its Ctrl-B [ keybinding.
                             var longPressDetected = false
                             var gestureEnded = false
+                            // #435 instrumentation: measure the gesture rather
+                            // than rely on anyone estimating how long they held.
+                            val gestureDownMs = System.currentTimeMillis()
+                            var gestureMaxMovePx = 0f
+                            var gestureLogged = false
+                            fun logGesture(outcome: String) {
+                                if (gestureLogged) return
+                                gestureLogged = true
+                                Log.d(
+                                    "HavenGesture",
+                                    gestureLogLine(
+                                        outcome = outcome,
+                                        pressMs = System.currentTimeMillis() - gestureDownMs,
+                                        thresholdMs = longPressDelayMs(
+                                            mouseMode = currentMouseModeActive,
+                                            systemLongPressMs = viewConfiguration.longPressTimeoutMillis,
+                                        ),
+                                        mouseMode = currentMouseModeActive,
+                                        movedPx = gestureMaxMovePx,
+                                        touchSlopPx = viewConfiguration.touchSlop,
+                                        pointerType = down.type.toString(),
+                                    ),
+                                )
+                            }
                             // Kept (always false) so the existing drag-detection branches
                             // (`if (armMouseDrag)` / `!callbackLongPressFired`) compile
                             // without surgery and fall through to the plain-swipe path.
@@ -1786,6 +1833,7 @@ internal fun TerminalWithAccessibility(
                                 ) {
                                     longPressDetected = true
                                     gestureType = GestureType.Selection
+                                    logGesture("selection-started")
 
                                     // Start selection
                                     val col = (down.position.x / baseCharWidth).toInt()
@@ -1985,6 +2033,13 @@ internal fun TerminalWithAccessibility(
                                 if (event.changes.all { !it.pressed }) break
 
                                 val change = event.changes.first()
+                                // Farthest the finger strayed from where it landed —
+                                // a "short tap" that drifts past touch slop is a drag,
+                                // and the log has to be able to show that (#435).
+                                gestureMaxMovePx = maxOf(
+                                    gestureMaxMovePx,
+                                    (change.position - down.position).getDistance(),
+                                )
                                 velocityTracker.addPosition(
                                     change.uptimeMillis,
                                     change.position,
@@ -2193,6 +2248,7 @@ internal fun TerminalWithAccessibility(
                             }
 
                             // 6. Gesture ended - cleanup
+                            logGesture("ended-${gestureType.name.lowercase()}")
                             gestureEnded = true
                             longPressJob.cancel()
                             callbackLongPressJob?.cancel()
