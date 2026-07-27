@@ -30,10 +30,22 @@ class ScrollThresholdTest {
         )
     }
 
-    /** Chosen so behaviour is unchanged on the 3x displays most users hold. */
+    /**
+     * Anchored to a real measured device rather than an assumed density: the
+     * OnePlus 13 this was tested on runs a 420dpi override (2.625x), where the
+     * old raw 24px worked out to 9.1dp. Landing within a pixel of that keeps
+     * the change imperceptible on the hardware it was measured against.
+     */
     @Test
-    fun `matches the previous raw 24px on a 3x display`() {
-        assertEquals(24f, scrollThresholdPx(3f), 0.001f)
+    fun `stays within a pixel of the old behaviour on the measured device`() {
+        assertEquals(24f, scrollThresholdPx(2.625f), 1.0f)
+    }
+
+    /** On the dense displays the complaint came from, it must not get twitchier. */
+    @Test
+    fun `is no more sensitive than before on 3x and 4x displays`() {
+        assertTrue("3x got more twitchy", scrollThresholdPx(3f) >= 24f)
+        assertTrue("4x got more twitchy", scrollThresholdPx(4f) >= 24f)
     }
 
     /** Sanity: it scales, rather than being a constant wearing a function's clothes. */

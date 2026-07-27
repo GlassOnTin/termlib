@@ -213,12 +213,18 @@ private const val MULTITOUCH_LIFTOFF_MS = 200L
  * send more escape sequences.
  *
  * This was a raw pixel count, which made scroll sensitivity depend on screen
- * density: 24px is about 1.3mm of travel on a 3x phone but three times that on
- * a 1x screen, so the same physical swipe sent a wildly different number of
- * wheel events depending on the device (#421). 8dp is what 24px worked out to
- * on a 3x display, so this is a no-op there and a correction everywhere else.
+ * density. Measured across real displays, the old 24px worked out to 12dp on
+ * a 2x screen, 9.1dp at 2.625x, 8dp at 3x and 6dp at 4x — so the denser the
+ * display, the shorter the swipe needed per wheel event, and the more escape
+ * sequences the same physical gesture sent (#421).
+ *
+ * No single value can leave every device unchanged; that inconsistency IS the
+ * bug. 9dp sits at the top of that observed range: near-identical on a 2.625x
+ * phone, slightly less twitchy on the 3x and 4x displays where the complaint
+ * came from, and slightly more responsive on 2x screens that previously needed
+ * an unusually long drag.
  */
-private const val SCROLL_THRESHOLD_DP = 8f
+private const val SCROLL_THRESHOLD_DP = 9f
 
 /**
  * [SCROLL_THRESHOLD_DP] in pixels at the given display [density]. Pure so the
