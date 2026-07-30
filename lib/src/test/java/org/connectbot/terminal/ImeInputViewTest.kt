@@ -1305,4 +1305,66 @@ class ImeInputViewTest {
 
         assertEquals("ls\r", rawText(outputs))
     }
+
+    // === HyperOS/Android 16 warm-return crash guard ===
+    //
+    // A focused interop child at removeAllViewsInLayout() time makes ViewGroup
+    // re-enter the disposing Compose hierarchy via rootViewRequestFocus()
+    // ("Searching for active node in inactive hierarchy"). The view must hold
+    // no focus while its window is invisible, and must NOT re-take focus
+    // synchronously on window-visible (that is exactly the crash frame) —
+    // only after REFOCUS_DELAY_MS.
+
+    private fun attachedView(): ImeInputView {
+        val view = makeView()
+        val activity = org.robolectric.Robolectric
+            .buildActivity(android.app.Activity::class.java).setup().get()
+        activity.setContentView(view)
+        return view
+    }
+
+    @Test
+    fun testWindowInvisibleDropsFocus() {
+        val view = attachedView()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            view.requestFocus()
+            assertTrue(view.isFocused)
+
+            view.dispatchWindowVisibilityChanged(View.GONE)
+        }
+        // Focus must not bounce back via rootViewRequestFocus (the known
+        // clearFocus-refocuses-first-focusable behaviour) even after idling.
+        advanceMainLooper(ImeInputView.REFOCUS_DELAY_MS + 32)
+        assertFalse(view.isFocused)
+    }
+
+    @Test
+    fun testWindowVisibleAgainRestoresFocusOnlyAfterDelay() {
+        val view = attachedView()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            assertTrue("initial requestFocus", view.requestFocus())
+            view.dispatchWindowVisibilityChanged(View.GONE)
+            assertFalse("focus dropped on GONE", view.isFocused)
+            assertFalse("unfocusable while hidden", view.isFocusable)
+
+            view.dispatchWindowVisibilityChanged(View.VISIBLE)
+            // Not synchronously: the deferred-disposal flush runs on the
+            // first frame after return.
+            assertFalse("no synchronous refocus", view.isFocused)
+        }
+        advanceMainLooper(ImeInputView.REFOCUS_DELAY_MS + 32)
+        assertTrue("focusable restored after delay", view.isFocusable)
+        assertTrue("focus restored after delay", view.isFocused)
+    }
+
+    @Test
+    fun testUnfocusedViewDoesNotGrabFocusOnWindowVisible() {
+        val view = attachedView()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            view.dispatchWindowVisibilityChanged(View.GONE)
+            view.dispatchWindowVisibilityChanged(View.VISIBLE)
+        }
+        advanceMainLooper(ImeInputView.REFOCUS_DELAY_MS + 32)
+        assertFalse(view.isFocused)
+    }
 }

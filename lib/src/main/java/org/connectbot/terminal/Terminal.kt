@@ -705,11 +705,22 @@ internal fun TerminalWithAccessibility(
             ?: remember { kotlinx.coroutines.flow.MutableStateFlow("") }
         ).collectAsState()
 
-    // Cleanup IME when component is disposed
+    // Cleanup IME when component is disposed. Drop focus first (via the
+    // FOCUSABLE flag, which clears focus without the clearFocus() re-focus
+    // bounce): a focused interop child at removeAllViewsInLayout() time makes
+    // ViewGroup re-enter the disposing Compose hierarchy via
+    // rootViewRequestFocus() (crashes on HyperOS/Android 16; see
+    // ImeInputView.onWindowVisibilityChanged). The view never outlives this
+    // effect, so it stays unfocusable.
     DisposableEffect(imeInputView) {
+        // Capture the key's value: onDispose reading the `imeInputView` state
+        // directly would act on the NEW view when the key changes null→view,
+        // marking it unfocusable at creation.
+        val disposingView = imeInputView
         onDispose {
             Log.d("Terminal", "Disposing Terminal - hiding IME")
-            imeInputView?.hideIme()
+            disposingView?.isFocusable = false
+            disposingView?.hideIme()
         }
     }
 

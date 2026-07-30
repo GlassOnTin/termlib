@@ -188,11 +188,50 @@ internal class ImeInputView(
         inputMethodManager.hideSoftInputFromWindow(windowToken, 0)
     }
 
+    /**
+     * This view must never hold View-focus while its window is not visible.
+     * On HyperOS/Android 16 warm return, Compose flushes deferred disposal of
+     * the hosting composition; AndroidViewHolder.removeAllViewsInLayout() sees
+     * a focused child, takes the rootViewRequestFocus() branch, and the focus
+     * request re-enters the half-disposed AndroidComposeView →
+     * IllegalStateException "Searching for active node in inactive hierarchy".
+     * The freeze always passes through window-invisible first, so dropping
+     * focus here disarms that branch. Focus is re-taken when the window is
+     * visible again, posted past the return frame (which is when the deferred
+     * disposal flush runs) and guarded on still being attached.
+     */
+    private val restoreFocusRunnable = Runnable {
+        if (isAttachedToWindow && !isFocusable) {
+            isFocusableInTouchMode = true // also restores isFocusable
+            requestFocus()
+        }
+    }
+
+    override fun onWindowVisibilityChanged(visibility: Int) {
+        super.onWindowVisibilityChanged(visibility)
+        if (visibility != VISIBLE) {
+            // A restore pending from a brief show must not fire while hidden —
+            // it would re-arm the crash for the next warm return.
+            removeCallbacks(restoreFocusRunnable)
+            if (isFocused) {
+                // Dropping FOCUSABLE clears focus as a side effect while the
+                // flag is already unset, so neither clearFocus()'s
+                // rootViewRequestFocus() nor focusableViewAvailable() can hand
+                // focus back. Stays unfocusable for the whole hidden period;
+                // `!isFocusable` doubles as the "restore on visible" marker.
+                isFocusable = false
+            }
+        } else if (!isFocusable) {
+            postDelayed(restoreFocusRunnable, REFOCUS_DELAY_MS)
+        }
+    }
+
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         // Always hide IME when view is detached to prevent SHOW_FORCED from keeping keyboard
         // open after the app/activity is destroyed
         hideIme()
+        removeCallbacks(restoreFocusRunnable)
         // Cancel any deferred Enter-fallback so a Handler callback doesn't fire
         // into a detached view after the IME committed "\n" just before teardown.
         activeConnection?.cancelPending()
@@ -1219,6 +1258,11 @@ internal class ImeInputView(
         // and what we're returning. Enable in-app via Settings → Logcat
         // Capture, then `grep ImeInputView /sdcard/Download/haven-logcat.txt`.
         const val TAG = "ImeInputView"
+
+        // Refocus after warm return must land AFTER the first frame, where
+        // Compose flushes deferred composition disposal (the crash window
+        // described at onWindowVisibilityChanged). ~6 frames of margin.
+        const val REFOCUS_DELAY_MS = 100L
 
         /**
          * Whether a hardware-keyboard key press should wipe the IME's tracked
