@@ -1367,4 +1367,46 @@ class ImeInputViewTest {
         advanceMainLooper(ImeInputView.REFOCUS_DELAY_MS + 32)
         assertFalse(view.isFocused)
     }
+
+    // The focus drop above is deliberate, but it must never swallow a
+    // show-keyboard request. showIme() gates on requestFocus(), which returns
+    // false while the view is unfocusable — and every caller is edge-triggered
+    // (a tap, or Terminal's LaunchedEffect(shouldShowIme)), so a swallowed
+    // show is never retried: the terminal is left unable to accept input.
+    // The race is real on warm return, where Terminal's IME_SHOW_DELAY_MS and
+    // REFOCUS_DELAY_MS are both 100ms.
+
+    @Test
+    fun testShowImeWhileUnfocusableStillTakesFocus() {
+        val view = attachedView()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            view.requestFocus()
+            view.dispatchWindowVisibilityChanged(View.GONE)
+            view.dispatchWindowVisibilityChanged(View.VISIBLE)
+            assertFalse("precondition: still unfocusable pre-delay", view.isFocusable)
+
+            // The user taps the terminal (or the resume effect fires) before
+            // the deferred refocus lands.
+            view.showIme()
+
+            assertTrue("showIme must restore focusability", view.isFocusable)
+            assertTrue("showIme must leave the view focused", view.isFocused)
+        }
+    }
+
+    @Test
+    fun testShowImeWhileWindowHiddenDoesNotRefocus() {
+        // The converse: while the window really is hidden, showIme() must NOT
+        // re-arm the crash by taking focus back (nothing legitimately asks for
+        // the keyboard then, and holding focus is what crashed HyperOS).
+        val view = attachedView()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            view.requestFocus()
+            view.dispatchWindowVisibilityChanged(View.GONE)
+
+            view.showIme()
+
+            assertFalse("must stay unfocused while the window is hidden", view.isFocused)
+        }
+    }
 }

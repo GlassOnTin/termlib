@@ -176,6 +176,18 @@ internal class ImeInputView(
      */
     @Suppress("DEPRECATION")
     fun showIme() {
+        // The window-invisible focus drop below must never swallow a show
+        // request: requestFocus() returns false while unfocusable, and every
+        // caller is edge-triggered (a tap, Terminal's LaunchedEffect on
+        // shouldShowIme) so nothing retries — the terminal is then left
+        // unable to accept input. Warm return races exactly here, with
+        // IME_SHOW_DELAY_MS and REFOCUS_DELAY_MS both at 100ms.
+        // Only safe once the window is back: holding focus in a hidden
+        // window is the crash described at onWindowVisibilityChanged.
+        if (!isFocusable && windowIsVisible) {
+            removeCallbacks(restoreFocusRunnable)
+            isFocusableInTouchMode = true // also restores isFocusable
+        }
         if (requestFocus()) {
             inputMethodManager.showSoftInput(this, InputMethodManager.SHOW_FORCED)
         }
@@ -207,8 +219,17 @@ internal class ImeInputView(
         }
     }
 
+    /**
+     * Last visibility seen by [onWindowVisibilityChanged]. Tracked separately
+     * from [getWindowVisibility] because the drop/restore decisions must key
+     * off the dispatched value. Assumed visible until told otherwise, matching
+     * the focusable-at-construction default.
+     */
+    private var windowIsVisible = true
+
     override fun onWindowVisibilityChanged(visibility: Int) {
         super.onWindowVisibilityChanged(visibility)
+        windowIsVisible = visibility == VISIBLE
         if (visibility != VISIBLE) {
             // A restore pending from a brief show must not fire while hidden —
             // it would re-arm the crash for the next warm return.
