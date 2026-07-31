@@ -185,8 +185,7 @@ private const val MOUSE_MODE_LONG_PRESS_MS = 900L
  * to it and the press gets [MOUSE_MODE_LONG_PRESS_MS] of grace; otherwise the
  * platform's own timeout applies. Pure so the policy is testable (#435).
  */
-internal fun longPressDelayMs(mouseMode: Boolean, systemLongPressMs: Long): Long =
-    if (mouseMode) MOUSE_MODE_LONG_PRESS_MS else systemLongPressMs
+internal fun longPressDelayMs(mouseMode: Boolean, systemLongPressMs: Long): Long = if (mouseMode) MOUSE_MODE_LONG_PRESS_MS else systemLongPressMs
 
 /**
  * Whether a tap landing while a selection is showing is spent dismissing that
@@ -197,8 +196,7 @@ internal fun longPressDelayMs(mouseMode: Boolean, systemLongPressMs: Long): Long
  * the app's, and consuming it to close Haven's own selection UI makes taps look
  * dead until the user taps a second time. Pure so the policy is testable.
  */
-internal fun tapOnlyDismissesSelection(selectionActive: Boolean, mouseMode: Boolean): Boolean =
-    selectionActive && !mouseMode
+internal fun tapOnlyDismissesSelection(selectionActive: Boolean, mouseMode: Boolean): Boolean = selectionActive && !mouseMode
 
 /**
  * One line per terminal gesture, tagged so a bug reporter can filter for it
@@ -1888,10 +1886,30 @@ internal fun TerminalWithAccessibility(
                             }
 
                             // 3. Check for multi-touch (zoom)
+                            //
+                            // ★This probe CONSUMES the one event it waits for. If that
+                            // event is the finger coming back up — a tap whose release
+                            // lands inside this window — it matches no second pointer,
+                            // is discarded here, and the main loop below then waits
+                            // forever for a release that has already happened. The
+                            // gesture never ends, and the long-press timer fires into a
+                            // finger that is no longer on the screen, producing a text
+                            // selection out of nowhere (#435).
+                            //
+                            // Delivery timing decides whether a real tap lands in the
+                            // window, which is why this looked device-specific: an
+                            // accessibility service re-injecting touches delivers them
+                            // in bunches, so the release arrives far sooner after the
+                            // press than a finger could manage.
+                            var releasedDuringProbe = false
                             val secondPointer = withTimeoutOrNull(
                                 WAIT_FOR_SECOND_TOUCH_MS,
                             ) {
-                                awaitPointerEvent().changes.firstOrNull { it.id != down.id && it.pressed }
+                                val probed = awaitPointerEvent()
+                                if (probed.changes.all { !it.pressed }) {
+                                    releasedDuringProbe = true
+                                }
+                                probed.changes.firstOrNull { it.id != down.id && it.pressed }
                             }
 
                             if (secondPointer != null && forcedSize == null) {
@@ -2060,7 +2078,11 @@ internal fun TerminalWithAccessibility(
                                 }
                             }
 
-                            while (true) {
+                            // Skipped when the release was already seen (and consumed) by the
+                            // multi-touch probe above: waiting for it again is what hung the
+                            // gesture. Falling straight through leaves gestureType
+                            // Undetermined, so the tap is still delivered below (#435).
+                            while (!releasedDuringProbe) {
                                 val event: PointerEvent =
                                     awaitPointerEvent(PointerEventPass.Main)
                                 if (event.changes.all { !it.pressed }) break

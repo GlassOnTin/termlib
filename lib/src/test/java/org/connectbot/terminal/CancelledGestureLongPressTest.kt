@@ -9,7 +9,6 @@ import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertTrue
-import org.junit.Ignore
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -68,15 +67,6 @@ class CancelledGestureLongPressTest {
         )
     }
 
-    @Ignore(
-        "#435 UNFIXED — this reproduces the defect and currently FAILS. A gesture " +
-            "that receives a finger-down and then no further pointer events keeps " +
-            "waiting, and the long-press timer fires into it, starting a selection " +
-            "with no finger on the screen. Cancelling the timer when the gesture " +
-            "coroutine is cancelled does NOT fix this: nothing is cancelled, the " +
-            "gesture is simply stuck. Un-ignore when the loop can no longer be left " +
-            "hanging.",
-    )
     @Test
     fun `a cancelled gesture leaves no long-press armed`() {
         ShadowLog.clear()
