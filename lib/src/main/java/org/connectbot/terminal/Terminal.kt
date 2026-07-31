@@ -208,20 +208,33 @@ internal fun tapOnlyDismissesSelection(selectionActive: Boolean, mouseMode: Bool
  * tap the user calls "as short as I can make it" starts a text selection on
  * their device, while a synthetic click of the same length does not on mine.
  * The disagreement is about what the touch stream actually contains, so this
- * prints the measurements rather than asking anyone to estimate them: how
- * long the press really lasted, how far it moved, what kind of pointer it
- * was, and which threshold was in force.
+ * prints the measurements rather than asking anyone to estimate them.
+ *
+ * ★[sinceDownMs] is time since this gesture's FIRST finger-down — not how long
+ * the user pressed. The distinction cost a reporter three wasted rounds: the
+ * field used to be called `pressMs`, and on a `selection-started` line it is
+ * ~[thresholdMs] BY CONSTRUCTION, because that line is emitted the instant the
+ * long-press timer fires. Reading `pressMs=901 thresholdMs=900` as "they held
+ * it for 901ms" is therefore circular; every such line says that. The real
+ * finger-down duration is [sinceDownMs] on the matching `ended-*` line.
+ *
+ * ★[gestureId] is what makes gesture merging visible: several physical taps
+ * sharing one id are one gesture as far as the pointer stream is concerned,
+ * which is the actual #435 defect. Without it, a 6794ms "press" that moved
+ * 6.9px looks like an implausible user rather than a missed finger-up.
  */
 internal fun gestureLogLine(
     outcome: String,
-    pressMs: Long,
+    gestureId: Long,
+    sinceDownMs: Long,
     thresholdMs: Long,
     mouseMode: Boolean,
     movedPx: Float,
     touchSlopPx: Float,
     pointerType: String,
-): String = "gesture=$outcome pressMs=$pressMs thresholdMs=$thresholdMs mouseMode=$mouseMode " +
-    "movedPx=${"%.1f".format(movedPx)} slopPx=${"%.1f".format(touchSlopPx)} pointer=$pointerType"
+): String = "gesture=$outcome id=$gestureId sinceDownMs=$sinceDownMs thresholdMs=$thresholdMs " +
+    "mouseMode=$mouseMode movedPx=${"%.1f".format(movedPx)} " +
+    "slopPx=${"%.1f".format(touchSlopPx)} pointer=$pointerType"
 
 /**
  * Millis after last multi-touch event to suppress tap from stale
@@ -1638,6 +1651,10 @@ internal fun TerminalWithAccessibility(
                         viewConfiguration.touchSlop * viewConfiguration.touchSlop
                     var lastMultiTouchTime = 0L
                     var lastTapTime = 0L
+                    // #435: consecutive taps that share an id are ONE gesture as
+                    // far as Compose is concerned — which is the bug the
+                    // reporter's log revealed, and impossible to see without it.
+                    var gestureIdCounter = 0L
                     coroutineScope {
                         awaitEachGesture {
                             var gestureType: GestureType = GestureType.Undetermined
@@ -1790,15 +1807,20 @@ internal fun TerminalWithAccessibility(
                             // than rely on anyone estimating how long they held.
                             val gestureDownMs = System.currentTimeMillis()
                             var gestureMaxMovePx = 0f
-                            var gestureLogged = false
+                            val gestureId = ++gestureIdCounter
                             fun logGesture(outcome: String) {
-                                if (gestureLogged) return
-                                gestureLogged = true
+                                // Every outcome is logged, not just the first.
+                                // Previously one line per gesture meant a gesture
+                                // that started a selection never reported how it
+                                // ENDED — so the real finger-down duration, the
+                                // one measurement the diagnosis needed, was never
+                                // recorded at all (#435).
                                 Log.d(
                                     "HavenGesture",
                                     gestureLogLine(
                                         outcome = outcome,
-                                        pressMs = System.currentTimeMillis() - gestureDownMs,
+                                        gestureId = gestureId,
+                                        sinceDownMs = System.currentTimeMillis() - gestureDownMs,
                                         thresholdMs = longPressDelayMs(
                                             mouseMode = currentMouseModeActive,
                                             systemLongPressMs = viewConfiguration.longPressTimeoutMillis,
