@@ -837,6 +837,16 @@ internal fun TerminalWithAccessibility(
     val maxScroll = remember(screenState.snapshot.scrollback.size, baseCharHeight) {
         screenState.snapshot.scrollback.size * baseCharHeight
     }
+
+    // #478: same trap as the char metrics above. The gesture handler is
+    // pointerInput(terminalEmulator, gestureCallback), which does NOT restart on
+    // a font-size change, so a plain capture of maxScroll stays at its pre-zoom
+    // value for the life of that coroutine. Every scroll then clamps to the old
+    // limit, and the scrollback a zoom just created cannot be reached —
+    // intermittently, because anything that changes gestureCallback (entering
+    // mouse mode, the alt screen) restarts the handler and silently fixes it
+    // until the next zoom.
+    val currentMaxScroll = rememberUpdatedState(maxScroll)
     // Mutable holder avoids recomposition for every indirect touchpad MOVE.
     val indirectSwipeAccumY = remember(terminalEmulator) { floatArrayOf(0f) }
     val interopTwoFingerLastY = remember(terminalEmulator) { floatArrayOf(Float.NaN) }
@@ -1468,7 +1478,8 @@ internal fun TerminalWithAccessibility(
             } else {
                 // Local terminal scrollback remains pixel-smooth, exactly like
                 // a direct touch drag.
-                val newOffset = (scrollOffset.value + deltaY).coerceIn(0f, maxScroll)
+                val newOffset =
+                    (scrollOffset.value + deltaY).coerceIn(0f, currentMaxScroll.value)
                 coroutineScope.launch { scrollOffset.snapTo(newOffset) }
                 val lines = (newOffset / currentCharHeight.value).toInt()
                 screenState.scrollBy(lines - screenState.scrollbackPosition)
@@ -1645,6 +1656,7 @@ internal fun TerminalWithAccessibility(
                     // this block's closure outlives any pinch-zoom font change.
                     val baseCharWidth by currentCharWidth
                     val baseCharHeight by currentCharHeight
+                    val maxScroll by currentMaxScroll
                     val touchSlopSquared =
                         viewConfiguration.touchSlop * viewConfiguration.touchSlop
                     var lastMultiTouchTime = 0L
