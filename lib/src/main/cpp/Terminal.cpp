@@ -194,6 +194,15 @@ Terminal::Terminal(JNIEnv* env, jobject callbacks, int rows, int cols, bool enab
         vterm_screen_enable_altscreen(mVts, 1);
     }
 
+    // #479: rewrap existing lines when the terminal is resized instead of
+    // truncating them. libvterm defaults this OFF, so a shrink permanently
+    // discarded everything past the new width — and pinch-zoom resizes the
+    // terminal, so zooming in cut every visible line to the narrower width and
+    // zooming back out left dead space where the text used to be. It was not
+    // scrolled out of view; it was gone. Reflow makes the resize a re-layout,
+    // which is what a user expects a zoom to be.
+    vterm_screen_enable_reflow(mVts, true);
+
     // Initialize callback structure as member variable so it doesn't go out of scope.
     // These callbacks run while mLock may be held by the native entrypoint that
     // triggered libvterm. Callback implementations must not synchronously call
