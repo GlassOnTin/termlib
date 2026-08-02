@@ -309,7 +309,16 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
             // of the line is not blank.
             val runLen = runEnd - curStart
             val restBlank = (runEnd until cols).all { cellChar[curRow][it].isWhitespace() }
-            if (!(restBlank && runLen in 1..(cols / 2))) return null
+            // Second fallback, for a break inside a filename with prose
+            // following it on the same row — the shape above requires the tail
+            // to sit alone on its line, which a wrapped paragraph never does.
+            // Gated on the previous row having been cut off rather than simply
+            // ending: the URL must run to that row's last printed column, so a
+            // URL with prose after it on its own row can never reach here.
+            val prevCutOff = (prevUrlEnd + 1 until cols).all { cellChar[prevRow][it].isWhitespace() }
+            val fileTail = prevCutOff &&
+                looksLikeWrappedFileTail(String(cellChar[curRow], curStart, runEnd - curStart))
+            if (!(restBlank && runLen in 1..(cols / 2)) && !fileTail) return null
         }
 
         return curStart

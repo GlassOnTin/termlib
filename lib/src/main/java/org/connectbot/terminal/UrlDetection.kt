@@ -30,6 +30,30 @@ internal fun String.trimDetectedUrl(): String {
     return substring(0, end)
 }
 
+/**
+ * Does [run] look like the tail of a URL broken inside a *filename*, rather
+ * than the first word of a sentence?
+ *
+ * A tool that hard-wraps at its own width can break a URL anywhere, including
+ * mid-filename, and the continuation then carries none of the `/#?&=` that
+ * otherwise marks a row as continuing a URL — `.../cases-recorded/gs-e` +
+ * `quilibrium.html, flux surfaces and all.` being the case that prompted this.
+ * A trailing extension is the one signal left: prose does not begin with a
+ * bare `word.ext` token often, and `i think this is prose` has nothing that
+ * resembles one.
+ *
+ * Deliberately narrow — two to four *letters* after the final dot. That takes
+ * `.html`, `.php`, `.md` and rejects version numbers like `1.2.3`, initials,
+ * and a sentence ending in a full stop.
+ */
+internal fun looksLikeWrappedFileTail(run: String): Boolean {
+    val trimmed = run.trimDetectedUrl()
+    val dot = trimmed.lastIndexOf('.')
+    if (dot <= 0 || dot == trimmed.lastIndex) return false
+    val extension = trimmed.substring(dot + 1)
+    return extension.length in 2..4 && extension.all { it.isLetter() }
+}
+
 private fun countOpenLessThanClose(s: String, end: Int, openChar: Char, closeChar: Char): Boolean {
     var openCount = 0
     var closeCount = 0
