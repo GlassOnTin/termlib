@@ -312,11 +312,19 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
             // Second fallback, for a break inside a filename with prose
             // following it on the same row — the shape above requires the tail
             // to sit alone on its line, which a wrapped paragraph never does.
-            // Gated on the previous row having been cut off rather than simply
-            // ending: the URL must run to that row's last printed column, so a
-            // URL with prose after it on its own row can never reach here.
+            //
+            // Two gates keep it off ordinary prose. The URL must run to the
+            // previous row's last printed column, so a URL with text after it
+            // on its own row can never reach here. And the tail must not have
+            // *fitted* on that row: a wrap is a line that ran out of room, so
+            // if the tail would have gone on the end of the previous row, the
+            // line ended for some other reason and the next row is its own
+            // thought. Without that second gate this glued real output
+            // together — `…/foo/bar` above `README.md and 3 other files`
+            // became `…/foo/barREADME.md`.
             val prevCutOff = (prevUrlEnd + 1 until cols).all { cellChar[prevRow][it].isWhitespace() }
-            val fileTail = prevCutOff &&
+            val roomOnPrevRow = cols - (prevUrlEnd + 1)
+            val fileTail = prevCutOff && runLen > roomOnPrevRow &&
                 looksLikeWrappedFileTail(String(cellChar[curRow], curStart, runEnd - curStart))
             if (!(restBlank && runLen in 1..(cols / 2)) && !fileTail) return null
         }

@@ -34,18 +34,46 @@ class UrlWrappedInFilenameTest {
     private val expected = "https://glassontin.github.io/sufficit/cases-recorded/gs-equilibrium.html"
 
     @Test
-    fun `the break is joined however much wider the terminal is than the wrap`() {
-        // The row carrying the URL is 60 columns. At 60 it fills the terminal
-        // and the old margin rule already covered it; every wider terminal is
-        // the reported bug, and the width of the mismatch is not knowable from
-        // the screen, so none of them may depend on it.
-        for (cols in listOf(60, 61, 62, 70, 100)) {
+    fun `the break is joined when the tail could not have fitted on the row above`() {
+        // The row carrying the URL is 60 columns and the tail is 16, so any
+        // terminal narrower than 76 could not have held the tail — which is
+        // what makes it a wrap rather than two lines that happen to adjoin.
+        // At 60 the row fills the terminal and the old margin rule already
+        // covered it; 61 upwards is the reported bug.
+        for (cols in listOf(60, 61, 62, 70, 75)) {
             val state = screenState(cols, *rows)
             assertEquals(
                 "cols=$cols",
                 expected,
                 state.getHyperlinkUrlAt(1, 10, autoDetectUrls = true),
             )
+        }
+    }
+
+    @Test
+    fun `a row ending far short of the margin is not a wrap`() {
+        // 60 columns of text in a 90-column terminal: the tail would have gone
+        // on the end of the row above, so nothing forced a break and the next
+        // row is its own line. No wrapping tool produces this shape, and
+        // treating it as a wrap is what glued "README.md and 3 other files"
+        // onto the end of a URL.
+        val state = screenState(90, *rows)
+        assertEquals(
+            "https://glassontin.github.io/sufficit/cases-recorded/gs-e",
+            state.getHyperlinkUrlAt(1, 10, autoDetectUrls = true),
+        )
+    }
+
+    @Test
+    fun `a filename on the line below a url is not absorbed`() {
+        // Real CLI output, and the false positive the fitting rule exists for.
+        listOf(
+            "Cloning into https://github.com/foo/bar" to "README.md and 3 other files changed",
+            "see https://example.com/docs" to "server.log has the details",
+        ).forEach { (first, second) ->
+            val state = screenState(80, first, second)
+            val url = state.getHyperlinkUrlAt(0, first.indexOf("https://") + 10, autoDetectUrls = true)
+            assertEquals(first.substringAfter("https://").let { "https://" + it }, url)
         }
     }
 
