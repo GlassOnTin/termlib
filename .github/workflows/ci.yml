@@ -87,8 +87,14 @@ jobs:
             tag.txt
             ConnectBotTerminal-*.aar
 
+      # Publishing is upstream's to do: the coordinates and the signing key
+      # belong to connectbot/termlib, and a fork has neither. Without this
+      # guard the step ran on every push to a fork's main and failed on the
+      # missing secret, leaving CI permanently red — which hides a real
+      # failure, since a broken build looks identical at a glance. The same
+      # guard is already on the `upload` job below.
       - name: Upload to Sonatype
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'connectbot/termlib'
         run: |
           ./gradlew publishToMavenCentral --no-configuration-cache -PmavenCentralUsername=${ORG_GRADLE_PROJECT_mavenCentralUsername} -PmavenCentralPassword=${ORG_GRADLE_PROJECT_mavenCentralPassword}
         env:
@@ -130,7 +136,11 @@ jobs:
   docs:
     name: Publish docs to GitHub Pages
     needs: build
-    if: ${{ (github.event_name == 'push') && ((github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/tags/')) }}
+    # Same reasoning as the Sonatype step: these are upstream's docs and
+    # upstream's Pages site. Until now this job was only ever skipped because
+    # `build` failed first, so fixing that would have moved the red here
+    # rather than removing it.
+    if: ${{ (github.event_name == 'push') && (github.repository == 'connectbot/termlib') && ((github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/tags/')) }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
