@@ -32,6 +32,12 @@ import java.nio.ByteBuffer
  * - All native calls are protected by a non-reentrant mutex
  * - Callbacks MUST NOT call back into Terminal methods (will deadlock)
  * - Safe to call from multiple threads (serialized by native mutex)
+ *
+ * That native mutex serialises calls against each other, but it cannot make
+ * destruction safe: it is a member of the `Terminal` that `nativeDestroy`
+ * deletes, so it dies with the object it would have to outlive. Lifetime is
+ * therefore this class's problem, and [withPtr] is where it is solved — see
+ * the note there before adding a method that touches [nativePtr].
  */
 internal class TerminalNative(callbacks: TerminalCallbacks, enableAltScreen: Boolean = true) : AutoCloseable {
     private var nativePtr: Long = 0
@@ -44,6 +50,49 @@ internal class TerminalNative(callbacks: TerminalCallbacks, enableAltScreen: Boo
     }
 
     /**
+     * Run [block] with the native pointer, or throw if the terminal is closed.
+     *
+     * **Every** native call goes through here. The old shape —
+     *
+     * ```
+     * checkNotClosed()
+     * return nativeWriteInputArray(nativePtr, …)
+     * ```
+     *
+     * — reads the pointer twice with a window in between, and frees the object
+     * from a place that window cannot see. Two ways that crashes, both of which
+     * land as a native SIGSEGV on whichever thread was running:
+     *
+     * 1. Nothing here calls [close]. The only thing that frees the native
+     *    terminal is [finalize], on the GC's finalizer thread. Once `nativePtr`
+     *    has been loaded into a register, `this` is never touched again, so the
+     *    collector may decide the object is unreachable and finalize it *while
+     *    the native call is still executing* — `delete term` underneath a live
+     *    `vterm_input_write`. This is the hazard `reachabilityFence` exists for.
+     * 2. An explicit `close()` on another thread, should one ever be added,
+     *    lands between the check and the use for the ordinary reason.
+     *
+     * `synchronized(this)` answers both with one mechanism: it makes the check,
+     * the read and the call atomic against [close], and a held monitor is a GC
+     * root, so the receiver cannot be finalised for as long as the native call
+     * is running. Reading into a local means the pointer passed to native is
+     * provably the one that was checked.
+     *
+     * Lock order is always JVM monitor → native mutex, so this cannot invert
+     * against the native lock. The existing rule still stands: a callback must
+     * not synchronously re-enter these methods — the JVM monitor is reentrant
+     * and would let it through, and the non-recursive native mutex would then
+     * deadlock exactly as it does today.
+     */
+    private inline fun <T> withPtr(block: (Long) -> T): T = synchronized(this) {
+        val ptr = nativePtr
+        if (ptr == 0L) {
+            throw IllegalStateException("Terminal has been closed")
+        }
+        block(ptr)
+    }
+
+    /**
      * Feed input data from PTY to the terminal emulator.
      * This processes the byte stream and updates the terminal state.
      *
@@ -52,8 +101,7 @@ internal class TerminalNative(callbacks: TerminalCallbacks, enableAltScreen: Boo
      * @return Number of bytes consumed
      */
     fun writeInput(buffer: ByteBuffer, length: Int): Int {
-        checkNotClosed()
-        return nativeWriteInputBuffer(nativePtr, buffer, length)
+        return withPtr { nativeWriteInputBuffer(it, buffer, length) }
     }
 
     /**
@@ -66,8 +114,7 @@ internal class TerminalNative(callbacks: TerminalCallbacks, enableAltScreen: Boo
      * @return Number of bytes consumed
      */
     fun writeInput(data: ByteArray, offset: Int = 0, length: Int = data.size - offset): Int {
-        checkNotClosed()
-        return nativeWriteInputArray(nativePtr, data, offset, length)
+        return withPtr { nativeWriteInputArray(it, data, offset, length) }
     }
 
     /**
@@ -78,8 +125,7 @@ internal class TerminalNative(callbacks: TerminalCallbacks, enableAltScreen: Boo
      * @return 0 on success
      */
     fun resize(rows: Int, cols: Int): Int {
-        checkNotClosed()
-        return nativeResize(nativePtr, rows, cols)
+        return withPtr { nativeResize(it, rows, cols) }
     }
 
     /**
@@ -91,8 +137,7 @@ internal class TerminalNative(callbacks: TerminalCallbacks, enableAltScreen: Boo
      * @return true if handled
      */
     fun dispatchKey(modifiers: Int, key: Int): Boolean {
-        checkNotClosed()
-        return nativeDispatchKey(nativePtr, modifiers, key)
+        return withPtr { nativeDispatchKey(it, modifiers, key) }
     }
 
     /**
@@ -104,8 +149,7 @@ internal class TerminalNative(callbacks: TerminalCallbacks, enableAltScreen: Boo
      * @return true if handled
      */
     fun dispatchCharacter(modifiers: Int, character: Int): Boolean {
-        checkNotClosed()
-        return nativeDispatchCharacter(nativePtr, modifiers, character)
+        return withPtr { nativeDispatchCharacter(it, modifiers, character) }
     }
 
     /**
@@ -118,8 +162,7 @@ internal class TerminalNative(callbacks: TerminalCallbacks, enableAltScreen: Boo
      * @return Number of cells in the run
      */
     fun getCellRun(row: Int, col: Int, run: CellRun): Int {
-        checkNotClosed()
-        return nativeGetCellRun(nativePtr, row, col, run)
+        return withPtr { nativeGetCellRun(it, row, col, run) }
     }
 
     /**
@@ -133,10 +176,9 @@ internal class TerminalNative(callbacks: TerminalCallbacks, enableAltScreen: Boo
      * @return Number of colors set, or -1 on error
      */
     fun setPaletteColors(colors: IntArray, count: Int = colors.size.coerceAtMost(16)): Int {
-        checkNotClosed()
         require(count <= 16) { "Can only set up to 16 ANSI palette colors" }
         require(colors.size >= count) { "Color array too small for requested count" }
-        return nativeSetPaletteColors(nativePtr, colors, count)
+        return withPtr { nativeSetPaletteColors(it, colors, count) }
     }
 
     /**
@@ -150,8 +192,7 @@ internal class TerminalNative(callbacks: TerminalCallbacks, enableAltScreen: Boo
      * @return 0 on success, -1 on error
      */
     fun setDefaultColors(foreground: Int, background: Int): Int {
-        checkNotClosed()
-        return nativeSetDefaultColors(nativePtr, foreground, background)
+        return withPtr { nativeSetDefaultColors(it, foreground, background) }
     }
 
     /**
@@ -164,8 +205,7 @@ internal class TerminalNative(callbacks: TerminalCallbacks, enableAltScreen: Boo
      * @return true if this line is a continuation of the previous line
      */
     fun getLineContinuation(row: Int): Boolean {
-        checkNotClosed()
-        return nativeGetLineContinuation(nativePtr, row)
+        return withPtr { nativeGetLineContinuation(it, row) }
     }
 
     /**
@@ -178,30 +218,34 @@ internal class TerminalNative(callbacks: TerminalCallbacks, enableAltScreen: Boo
      * @return 0 on success, -1 on error
      */
     fun setBoldHighbright(enabled: Boolean): Int {
-        checkNotClosed()
-        return nativeSetBoldHighbright(nativePtr, enabled)
+        return withPtr { nativeSetBoldHighbright(it, enabled) }
     }
 
     /**
      * Close the terminal and release native resources.
      * After calling this, the Terminal instance cannot be used.
      */
+    @Synchronized
     override fun close() {
-        if (nativePtr != 0L) {
-            nativeDestroy(nativePtr)
+        val ptr = nativePtr
+        if (ptr != 0L) {
+            // Cleared FIRST, so that even if nativeDestroy throws, no later
+            // call can be handed a pointer whose object is being torn down.
             nativePtr = 0
+            nativeDestroy(ptr)
         }
     }
 
-    private fun checkNotClosed() {
-        if (nativePtr == 0L) {
-            throw IllegalStateException("Terminal has been closed")
-        }
-    }
-
+    /**
+     * Failsafe only — and, today, the *sole* thing that ever frees the native
+     * terminal: nothing in this library calls [close]. That makes the finalizer
+     * race in [withPtr] the live one rather than a theoretical one, and it also
+     * means the native terminal lives until the collector gets round to it.
+     * Giving `TerminalEmulator` a real close is worth doing separately; this
+     * class being safe when it happens is the part that belongs here.
+     */
     @Suppress("unused")
     protected fun finalize() {
-        // Failsafe cleanup
         close()
     }
 
