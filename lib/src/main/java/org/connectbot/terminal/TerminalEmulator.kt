@@ -73,7 +73,23 @@ sealed class UrlScanScope {
  * so it may be run in a Service on Android. It handles the management of
  * the terminal emulation state.
  */
-sealed interface TerminalEmulator {
+sealed interface TerminalEmulator : AutoCloseable {
+    /**
+     * Release the native terminal.
+     *
+     * Until this existed the C++ terminal was freed only by a finalizer, which
+     * is both non-deterministic — the memory stays held until the collector
+     * gets round to it — and the mechanism behind #509's use-after-free, since
+     * the collector will happily run while a native call is on the stack.
+     *
+     * Idempotent, safe from any thread, and safe to race: once closed, every
+     * method on this interface becomes a no-op rather than throwing, because
+     * the threads still calling in are transports delivering their last bytes
+     * as the UI tears the screen down, and killing one of those is a worse
+     * outcome than dropping output nobody will see.
+     */
+    override fun close()
+
     /**
      * Write data to the terminal (from PTY/transport).
      */
@@ -466,13 +482,59 @@ internal class TerminalEmulatorImpl(
     }
 
     // Native terminal instance - MUST be initialized AFTER damageLock and other state
-    private val terminalNative by lazy {
+    //
+    // The delegate is held by name so [close] can ask whether it was ever
+    // initialized. Touching `terminalNative` to close it would otherwise
+    // *construct* a native terminal for the sole purpose of destroying it,
+    // on an emulator that was created and dropped without being used.
+    private val terminalNativeDelegate = lazy {
         TerminalNative(this, enableAltScreen).apply {
             resize(initialRows, initialCols)
             if (setBoldHighbright(boldAsBright) != 0) {
                 Log.e(TAG, "Failed to set boldAsBright=$boldAsBright")
             }
         }
+    }
+    private val terminalNative by terminalNativeDelegate
+
+    /**
+     * Set by [close]. Volatile because the threads that observe it are the
+     * transports feeding this emulator, not the one that closes it.
+     */
+    @Volatile
+    private var closed = false
+
+    /**
+     * Run [block] unless the terminal has been closed.
+     *
+     * The `closed` check handles the ordinary case. The catch handles the race
+     * the check cannot: [close] landing between the check and the native call.
+     * `TerminalNative` throws exactly one `IllegalStateException`, "Terminal has
+     * been closed", so this is narrow rather than a blanket swallow — and the
+     * alternative is that exception unwinding an SSH reader thread and taking
+     * the process with it, which is precisely the class of failure this whole
+     * change exists to remove.
+     */
+    private inline fun whenOpen(what: String, block: () -> Unit) {
+        if (closed) return
+        try {
+            block()
+        } catch (closedUnderneathUs: IllegalStateException) {
+            Log.d(TAG, "$what after close, ignoring: ${closedUnderneathUs.message}")
+        }
+    }
+
+    override fun close() {
+        // Ordered: stop new work being accepted, then drop what is queued, then
+        // free. Freeing first would leave posted callbacks to find a dead
+        // pointer, which is the bug this method exists to prevent.
+        if (closed) return
+        closed = true
+        handler.removeCallbacksAndMessages(null)
+        if (terminalNativeDelegate.isInitialized()) {
+            terminalNative.close()
+        }
+        Log.d(TAG, "Terminal emulator closed")
     }
 
     // Parser for OSC sequences
@@ -485,15 +547,14 @@ internal class TerminalEmulatorImpl(
     /**
      * Write data to the terminal (from PTY/transport).
      */
-    override fun writeInput(data: ByteArray, offset: Int, length: Int) {
-        terminalNative.writeInput(data, offset, length)
-    }
+    override fun writeInput(data: ByteArray, offset: Int, length: Int) =
+        whenOpen("writeInput") { terminalNative.writeInput(data, offset, length) }
 
     /**
      * Write data to the terminal using ByteBuffer (more efficient for large data).
      */
     override fun writeInput(buffer: ByteBuffer, length: Int) {
-        terminalNative.writeInput(buffer, length)
+        whenOpen("writeInput") { terminalNative.writeInput(buffer, length) }
     }
 
     /**
@@ -504,7 +565,7 @@ internal class TerminalEmulatorImpl(
         val oldRows = rows
         rows = newRows
         cols = newCols
-        terminalNative.resize(newRows, newCols)
+        whenOpen("resize") { terminalNative.resize(newRows, newCols) }
         // #272 diagnostics: correlate intermittent blanks with resizes.
         Log.d(TAG, "resize ${oldRows}x$oldCols -> ${newRows}x$newCols")
 
@@ -560,14 +621,14 @@ internal class TerminalEmulatorImpl(
      * Dispatch a key event to the terminal.
      */
     override fun dispatchKey(modifiers: Int, key: Int) {
-        terminalNative.dispatchKey(modifiers, key)
+        whenOpen("dispatchKey") { terminalNative.dispatchKey(modifiers, key) }
     }
 
     /**
      * Dispatch a character to the terminal.
      */
     override fun dispatchCharacter(modifiers: Int, codepoint: Int) {
-        terminalNative.dispatchCharacter(modifiers, codepoint)
+        whenOpen("dispatchCharacter") { terminalNative.dispatchCharacter(modifiers, codepoint) }
     }
 
     /**
@@ -646,7 +707,10 @@ internal class TerminalEmulatorImpl(
         require(ansiColors.size >= 16) {
             "ANSI palette must contain 16 colors"
         }
-        val result = terminalNative.setPaletteColors(ansiColors, 16)
+        // -1 is this API's existing "did not happen" value, so a closed
+        // terminal reports the same thing a failed call always did.
+        var result = -1
+        whenOpen("setAnsiPalette") { result = terminalNative.setPaletteColors(ansiColors, 16) }
         invalidateDisplay()
         return result
     }
@@ -667,7 +731,8 @@ internal class TerminalEmulatorImpl(
             currentDefaultForeground = Color(foreground)
             currentDefaultBackground = Color(background)
         }
-        val result = terminalNative.setDefaultColors(foreground, background)
+        var result = -1
+        whenOpen("setDefaultColors") { result = terminalNative.setDefaultColors(foreground, background) }
         invalidateDisplay()
         return result
     }
@@ -1057,6 +1122,15 @@ internal class TerminalEmulatorImpl(
      */
     @VisibleForTesting
     fun processPendingUpdates() {
+        // A frame callback posted before close() still fires: Choreographer
+        // callbacks are not in the Handler queue that close() drains, and no
+        // reference is kept to remove them with. The rebuild below reads cells
+        // out of the native terminal, so this guard is what stops it reading a
+        // terminal that has been freed.
+        whenOpen("processPendingUpdates") { processPendingUpdatesInner() }
+    }
+
+    private fun processPendingUpdatesInner() {
         // Collect pending changes
         val damageRegions: List<DamageRegion>
         val needsUpdate: Boolean
