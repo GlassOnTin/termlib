@@ -17,6 +17,7 @@
 package org.connectbot.terminal
 
 import android.content.Context
+import android.content.res.Configuration
 import android.text.Editable
 import android.text.Selection
 import android.util.Log
@@ -189,9 +190,27 @@ internal class ImeInputView(
             isFocusableInTouchMode = true // also restores isFocusable
         }
         if (requestFocus()) {
-            inputMethodManager.showSoftInput(this, InputMethodManager.SHOW_FORCED)
+            inputMethodManager.showSoftInput(this, showImeFlags())
         }
     }
+
+    /**
+     * SHOW_FORCED normally, nothing when a physical keyboard can type.
+     *
+     * #511: on a Meta Quest 3 with a keyboard attached, the virtual keyboard rose
+     * over the session on every keypress. SHOW_FORCED is documented to hold the
+     * IME open "until the user explicitly closes it", which overrides the
+     * platform's own rule that a usable hardware keyboard suppresses the soft
+     * one. Passing no flags hands that decision back to the platform, which still
+     * honours the user's "show virtual keyboard" setting for anyone who wants
+     * both.
+     *
+     * hardKeyboardHidden is part of the test because a folded or docked device
+     * reports KEYBOARD_QWERTY while the keys are physically unreachable, and there
+     * the soft keyboard is the only way to type.
+     */
+    private fun showImeFlags(): Int =
+        imeShowFlags(resources.configuration.keyboard, resources.configuration.hardKeyboardHidden)
 
     /**
      * Hide the IME.
@@ -1390,4 +1409,28 @@ internal class ImeInputView(
          */
         const val EDITABLE_MAX_LENGTH = 512
     }
+}
+
+/**
+ * Flags for `showSoftInput` given the current [Configuration] keyboard state.
+ *
+ * #511: on a Meta Quest 3 with a keyboard attached, the virtual keyboard rose over
+ * the session on every keypress. SHOW_FORCED is documented to hold the IME open
+ * "until the user explicitly closes it", which overrides the platform's own rule
+ * that a usable hardware keyboard suppresses the soft one. Passing no flags hands
+ * that decision back to the platform, which still honours the user's "show virtual
+ * keyboard" setting for anyone who wants both.
+ *
+ * [hardKeyboardHidden] is part of the test because a folded or docked device
+ * reports KEYBOARD_QWERTY while the keys are physically unreachable; there the soft
+ * keyboard is the only way to type and SHOW_FORCED still earns its keep.
+ *
+ * Top-level and internal so the policy can be tested without a Context — the
+ * values are plain Configuration constants.
+ */
+@Suppress("DEPRECATION")
+internal fun imeShowFlags(keyboard: Int, hardKeyboardHidden: Int): Int {
+    val physicalKeyboardAttached = keyboard != Configuration.KEYBOARD_NOKEYS &&
+        hardKeyboardHidden == Configuration.HARDKEYBOARDHIDDEN_NO
+    return if (physicalKeyboardAttached) 0 else InputMethodManager.SHOW_FORCED
 }
