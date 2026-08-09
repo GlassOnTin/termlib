@@ -69,8 +69,7 @@ internal class ImeInputView(
      * Show the IME forcefully. This is more reliable than SoftwareKeyboardController.
      */
     @Suppress("DEPRECATION")
-    private fun showImeFlags(): Int =
-        imeShowFlags(resources.configuration.keyboard, resources.configuration.hardKeyboardHidden)
+    private fun showImeFlags(): Int = imeShowFlags(resources.configuration.keyboard, resources.configuration.hardKeyboardHidden)
 
     fun showIme() {
         if (requestFocus()) {
