@@ -545,7 +545,7 @@ internal class ImeInputView(
             val newText = text?.toString() ?: ""
             Log.d(
                 TAG,
-                "setComposingText(text=${text?.toString()?.take(40)?.let { "\"$it\"" } ?: "null"}" +
+                "setComposingText(text=${quoteForLog(text)}" +
                     ", newCursorPos=$newCursorPosition) fullEditor=$fullEditor",
             )
 
@@ -775,8 +775,28 @@ internal class ImeInputView(
             flags = 0
         }
 
-        private fun quoteForLog(cs: CharSequence?): String =
-            cs?.toString()?.take(40)?.let { "\"$it\" (len=${cs.length})" } ?: "null"
+        /**
+         * Whether this build may put typed text in the log at all (#518).
+         *
+         * Off unless a developer opts in on their own device with
+         *
+         *     adb shell setprop log.tag.ImeInputView VERBOSE
+         *
+         * which no ordinary install has set. These traces exist because IME
+         * behaviour on Android is close to undebuggable without them, but the
+         * text flowing through here is *what the user typed* — a report on #518
+         * showed a session's keystrokes reconstructed character by character
+         * from a logcat, and a sudo password would have landed there the same
+         * way. Structure (lengths, positions, flags) is kept unconditionally
+         * because it is what the logs are actually read for; the content is not.
+         */
+        private val logContent: Boolean get() = Log.isLoggable(TAG, Log.VERBOSE)
+
+        private fun quoteForLog(cs: CharSequence?): String = when {
+            cs == null -> "null"
+            logContent -> "\"${cs.toString().take(40)}\" (len=${cs.length})"
+            else -> "(len=${cs.length})"
+        }
 
         override fun deleteSurroundingText(leftLength: Int, rightLength: Int): Boolean {
             Log.d(
@@ -929,8 +949,12 @@ internal class ImeInputView(
         override fun sendKeyEvent(event: KeyEvent): Boolean {
             Log.d(
                 TAG,
-                "sendKeyEvent(action=${event.action} keyCode=${event.keyCode}" +
-                    " unicode=${event.unicodeChar}) suppressed=$suppressKeyEvents" +
+                // keyCode and unicodeChar each name the character typed, so they are
+                // the payload rather than the metadata here (#518). What these logs
+                // are read for is the suppression bookkeeping, which is kept.
+                "sendKeyEvent(action=${event.action}" +
+                    (if (logContent) " keyCode=${event.keyCode} unicode=${event.unicodeChar}" else "") +
+                    ") suppressed=$suppressKeyEvents" +
                     " pendingSuppress=${pendingSuppressChars.size}",
             )
             if (suppressKeyEvents) return true
@@ -1012,7 +1036,7 @@ internal class ImeInputView(
         ): Boolean {
             Log.d(
                 TAG,
-                "replaceText(start=$start, end=$end, text=\"${text.toString().take(40)}\"" +
+                "replaceText(start=$start, end=$end, text=${quoteForLog(text)}" +
                     ", newCursorPos=$newCursorPosition)",
             )
             val ed = editable
@@ -1038,7 +1062,7 @@ internal class ImeInputView(
             val committedText = text?.toString() ?: ""
             Log.d(
                 TAG,
-                "commitText(\"${committedText.take(40)}\", newCursorPos=$newCursorPosition)" +
+                "commitText(${quoteForLog(committedText)}, newCursorPos=$newCursorPosition)" +
                     " pendingReplacement=$pendingReplacementLength",
             )
             // super.commitText() updates the Editable state (needed for IME sync)
