@@ -772,10 +772,34 @@ void Terminal::invokeSetTermProp(VTermProp prop, VTermValue* val) {
 
         case VTERM_VALUETYPE_STRING:
             if (val->string.str) {
-                char* utf8_str = mutf8_to_utf8(val->string.str, val->string.len, nullptr);
-                ScopedLocalRef<jstring> str(env, env->NewStringUTF(utf8_str));
-                propValue = ScopedLocalRef<jobject>(env, env->NewObject(mTerminalPropertyStringClass, mTerminalPropertyStringConstructor, str.get()));
-                free(utf8_str);
+                // Decoded to UTF-16 for the same reason as the OSC payload below:
+                // NewStringUTF wants *modified* UTF-8 and ART aborts the whole
+                // process on anything else. This path carries VTERM_PROP_TITLE and
+                // VTERM_PROP_ICONNAME — a window title, set by the remote shell on
+                // every prompt — so the bytes are entirely the remote's choice.
+                //
+                // Two ways the old code aborted, and the second is ordinary rather
+                // than exotic:
+                //
+                //   * modified UTF-8 has no 4-byte form, encoding supplementary
+                //     characters as a CESU-8 surrogate pair instead. A single emoji
+                //     in a title is a 4-byte sequence and is therefore not valid
+                //     input to NewStringUTF at all.
+                //   * mutf8_to_utf8 converted *away* from modified UTF-8 and then
+                //     handed the result to the function that requires it, so it
+                //     worked only for the ASCII subset where the two coincide.
+                //
+                // Sized from string.len rather than a NUL scan, so an embedded NUL
+                // truncates nothing.
+                const std::u16string titleUtf16 =
+                    utf8_to_utf16_lossy(val->string.str, val->string.len);
+                ScopedLocalRef<jstring> str(
+                    env,
+                    env->NewString(reinterpret_cast<const jchar*>(titleUtf16.data()),
+                                   static_cast<jsize>(titleUtf16.size())));
+                if (str.get()) {
+                    propValue = ScopedLocalRef<jobject>(env, env->NewObject(mTerminalPropertyStringClass, mTerminalPropertyStringConstructor, str.get()));
+                }
             }
             break;
 
