@@ -471,6 +471,14 @@ fun Terminal(
     selectionForegroundColor: Color = Color.Black,
     keyboardEnabled: Boolean = false,
     showSoftKeyboard: Boolean = true,
+    /**
+     * Bump to re-run the IME show even though [showSoftKeyboard] hasn't
+     * changed — the warm-return restore (#515). The show must be this
+     * terminal's own [ImeInputView.showIme]: an InsetsController show from
+     * the host layer dies in the IMM ("view not served") because
+     * ImeInputView drops focusability while its window is invisible.
+     */
+    imeRestoreTick: Int = 0,
     focusRequester: FocusRequester = remember { FocusRequester() },
     onTerminalTap: () -> Unit = {},
     onTerminalDoubleTap: () -> Unit = {},
@@ -553,6 +561,7 @@ fun Terminal(
         backgroundOpacity = backgroundOpacity,
         keyboardEnabled = keyboardEnabled,
         showSoftKeyboard = showSoftKeyboard,
+        imeRestoreTick = imeRestoreTick,
         focusRequester = focusRequester,
         onTerminalTap = onTerminalTap,
         onTerminalDoubleTap = onTerminalDoubleTap,
@@ -600,6 +609,7 @@ internal fun TerminalWithAccessibility(
     backgroundOpacity: Float = 1f,
     keyboardEnabled: Boolean = false,
     showSoftKeyboard: Boolean = true,
+    imeRestoreTick: Int = 0,
     focusRequester: FocusRequester = remember { FocusRequester() },
     onTerminalTap: () -> Unit = {},
     onTerminalDoubleTap: () -> Unit = {},
@@ -751,6 +761,23 @@ internal fun TerminalWithAccessibility(
                 view.hideIme()
                 Log.d("Terminal", "IME hide completed")
                 onImeVisibilityChanged(false)
+            }
+        }
+    }
+
+    // Warm-return keyboard restore (#515). A background round trip leaves
+    // shouldShowIme unchanged, so the effect above never re-fires, yet the
+    // platform has torn the IME down. The host bumps imeRestoreTick when its
+    // pause-time record says a keyboard should come back; the show must be
+    // showIme() because this view dropped focus and focusability while the
+    // window was invisible, so nothing else in the window can be served.
+    LaunchedEffect(imeRestoreTick) {
+        if (imeRestoreTick > 0 && shouldShowIme) {
+            imeInputView?.let { view ->
+                delay(IME_SHOW_DELAY_MS)
+                Log.i("TerminalIme", "ime restore tick=$imeRestoreTick -> showIme()")
+                view.showIme()
+                onImeVisibilityChanged(true)
             }
         }
     }
