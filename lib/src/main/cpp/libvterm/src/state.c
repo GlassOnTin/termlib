@@ -9,6 +9,24 @@
 # define DEBUG_GLYPH_COMBINE
 #endif
 
+/* HAVEN PATCH (#517, #526): bring the cursor back inside the grid.
+ *
+ * Used where upstream calls abort() on an out-of-bounds cursor. Those checks
+ * are reached from remote-controlled input, and aborting takes the whole host
+ * application with it — see the note at the Ctrl-character check.
+ *
+ * A zero-sized grid is possible in principle (a resize that has not delivered
+ * yet), so the lower clamp is applied last and unconditionally: an empty
+ * terminal gets (0,0) rather than (-1,-1), which is in bounds for every caller
+ * that only reads it back. */
+static void vterm_state_clamp_pos(VTermState *state)
+{
+  if(state->pos.row >= state->rows) state->pos.row = state->rows - 1;
+  if(state->pos.col >= state->cols) state->pos.col = state->cols - 1;
+  if(state->pos.row < 0) state->pos.row = 0;
+  if(state->pos.col < 0) state->pos.col = 0;
+}
+
 /* Some convenient wrappers to make callback functions easier */
 
 static void putglyph(VTermState *state, const uint32_t chars[], int width, VTermPos pos)
@@ -435,11 +453,14 @@ static int on_text(const char bytes[], size_t len, void *user)
   updatecursor(state, &oldpos, 0);
 
 #ifdef DEBUG
+  /* HAVEN PATCH (#517, #526): clamp rather than abort(). See the note on the
+   * Ctrl case below — these five checks all end a user's session on input the
+   * remote controls. */
   if(state->pos.row < 0 || state->pos.row >= state->rows ||
      state->pos.col < 0 || state->pos.col >= state->cols) {
-    fprintf(stderr, "Position out of bounds after text: (%d,%d)\n",
+    fprintf(stderr, "Position out of bounds after text: (%d,%d); clamping\n",
         state->pos.row, state->pos.col);
-    abort();
+    vterm_state_clamp_pos(state);
   }
 #endif
 
@@ -534,11 +555,22 @@ static int on_control(unsigned char control, void *user)
   updatecursor(state, &oldpos, 1);
 
 #ifdef DEBUG
+  /* HAVEN PATCH (#517, #526): clamp rather than abort().
+   *
+   * Every one of these bounds checks fires on data the *remote* chose: text,
+   * a control character, a CSI sequence. Upstream's response is abort(), which
+   * in a library linked into an app means any server — malicious, buggy, or
+   * merely emitting something libvterm mishandles — can end the user's session
+   * outright, with no exception and nothing to catch. Two crash reports of
+   * "Haven just closes" traced back to this family.
+   *
+   * A cursor left in a wrong-but-valid cell is a recoverable glitch: the next
+   * thing the remote draws moves it. The process going away is not. */
   if(state->pos.row < 0 || state->pos.row >= state->rows ||
      state->pos.col < 0 || state->pos.col >= state->cols) {
-    fprintf(stderr, "Position out of bounds after Ctrl %02x: (%d,%d)\n",
+    fprintf(stderr, "Position out of bounds after Ctrl %02x: (%d,%d); clamping\n",
         control, state->pos.row, state->pos.col);
-    abort();
+    vterm_state_clamp_pos(state);
   }
 #endif
 
@@ -1562,21 +1594,26 @@ static int on_csi(const char *leader, const long args[], int argcount, const cha
 #ifdef DEBUG
   if(state->pos.row < 0 || state->pos.row >= state->rows ||
      state->pos.col < 0 || state->pos.col >= state->cols) {
-    fprintf(stderr, "Position out of bounds after CSI %c: (%d,%d)\n",
+    fprintf(stderr, "Position out of bounds after CSI %c: (%d,%d); clamping\n",
         command, state->pos.row, state->pos.col);
-    abort();
+    vterm_state_clamp_pos(state);
   }
 
+  /* HAVEN PATCH (#517, #526): reset the region rather than abort(). A scroll
+   * region the remote set to something degenerate becomes the whole screen,
+   * which is the documented default and always valid. */
   if(SCROLLREGION_BOTTOM(state) <= state->scrollregion_top) {
-    fprintf(stderr, "Scroll region height out of bounds after CSI %c: %d <= %d\n",
+    fprintf(stderr, "Scroll region height out of bounds after CSI %c: %d <= %d; resetting\n",
         command, SCROLLREGION_BOTTOM(state), state->scrollregion_top);
-    abort();
+    state->scrollregion_top = 0;
+    state->scrollregion_bottom = -1;
   }
 
   if(SCROLLREGION_RIGHT(state) <= SCROLLREGION_LEFT(state)) {
-    fprintf(stderr, "Scroll region width out of bounds after CSI %c: %d <= %d\n",
+    fprintf(stderr, "Scroll region width out of bounds after CSI %c: %d <= %d; resetting\n",
         command, SCROLLREGION_RIGHT(state), SCROLLREGION_LEFT(state));
-    abort();
+    state->scrollregion_left = 0;
+    state->scrollregion_right = -1;
   }
 #endif
 

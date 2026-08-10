@@ -659,10 +659,31 @@ static void resize_buffer(VTermScreen *screen, int bufidx, int new_rows, int new
       new_cursor.col = new_cols-1;
   }
 
-  /* We really expect the cursor position to be set by now */
+  /* We really expect the cursor position to be set by now.
+   *
+   * HAVEN PATCH (#517, #526): upstream calls abort() here. In a library linked
+   * into an app that is not a diagnostic, it is the app vanishing mid-session
+   * with no exception and nothing to catch — reported twice as "Haven just
+   * closes", once about a second after connecting.
+   *
+   * The condition means the reflow walk above never found the old cursor while
+   * rebuilding the grid. That is a bug worth knowing about, but the cursor
+   * being somewhere defensible is a complete recovery: the grid itself is
+   * already rebuilt correctly by this point, and the next thing the remote
+   * draws will move the cursor anyway. Losing the cursor position is not worth
+   * losing the session over.
+   *
+   * Clamped to the old position where it is representable, so a resize that
+   * hits this keeps the cursor near where the user left it rather than jumping
+   * to the corner. */
   if(active && (new_cursor.row == -1 || new_cursor.col == -1)) {
-    fprintf(stderr, "screen_resize failed to update cursor position\n");
-    abort();
+    fprintf(stderr, "screen_resize failed to update cursor position; clamping\n");
+    if(new_cursor.row == -1)
+      new_cursor.row = old_cursor.row < new_rows ? old_cursor.row : new_rows - 1;
+    if(new_cursor.col == -1)
+      new_cursor.col = old_cursor.col < new_cols ? old_cursor.col : new_cols - 1;
+    if(new_cursor.row < 0) new_cursor.row = 0;
+    if(new_cursor.col < 0) new_cursor.col = 0;
   }
 
   if(old_row >= 0 && bufidx == BUFIDX_PRIMARY) {
