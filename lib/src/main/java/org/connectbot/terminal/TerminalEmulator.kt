@@ -968,8 +968,30 @@ internal class TerminalEmulatorImpl(
         synchronized(damageLock) {
             if (scrollback.isEmpty()) return 0
 
-            val line = scrollback.removeAt(scrollback.size - 1)
+            var line = scrollback.removeAt(scrollback.size - 1)
             scrollbackDirty = true
+
+            // #478: a pop at a width narrower than the stored content used to
+            // hand vterm the first `cols` cells and drop the line — rotating
+            // landscape→portrait destroyed every wide line's tail as the row
+            // growth popped 80-col lines onto a 40-col screen. vterm pops
+            // bottom-up, so deliver the LAST row's worth of content and
+            // re-store the head soft-wrapped: the next pop takes the head,
+            // and the line renders wrapped instead of ceasing to exist.
+            // (Content width ignores trailing blanks — every pushed line is
+            // padded to the old grid width; a styled blank tail past the last
+            // glyph is the one thing this trim can drop. A double-width char
+            // straddling the split renders mangled at the seam, not lost.)
+            val contentWidth = line.cells.indexOfLast {
+                it.char != ' ' || it.combiningChars.isNotEmpty()
+            } + 1
+            if (contentWidth > cols) {
+                val split = ((contentWidth - 1) / cols) * cols
+                scrollback.add(
+                    line.copy(cells = line.cells.take(split), softWrapped = true),
+                )
+                line = line.copy(cells = line.cells.subList(split, contentWidth).toList())
+            }
 
             // Convert TerminalLine.Cell back to ScreenCell (reverse of pushScrollbackLine)
             for (i in 0 until minOf(cols, cells.size)) {

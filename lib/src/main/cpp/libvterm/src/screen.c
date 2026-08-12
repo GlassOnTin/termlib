@@ -696,13 +696,26 @@ static void resize_buffer(VTermScreen *screen, int bufidx, int new_rows, int new
   }
   if(new_row >= 0 && bufidx == BUFIDX_PRIMARY &&
       screen->callbacks && screen->callbacks->sb_popline) {
-    /* Try to backfill rows by popping scrollback buffer */
+    /* Try to backfill rows by popping scrollback buffer
+     *
+     * HAVEN PATCH (#478): upstream pops at old_cols and then copies only
+     * min(old_cols, new_cols) columns into the new row — the popped line has
+     * already been removed from the scrollback store, so on any resize where
+     * rows grow while columns shrink (rotation, a compound pinch resize)
+     * everything past new_cols was silently destroyed. The reflow walk above
+     * only covers live screen rows, never popped ones.
+     *
+     * Pop at new_cols instead: the store keeps ownership of content that
+     * does not fit, handing back at most a row's worth (Haven's store
+     * re-queues the overflow as a soft-wrapped line, so the next pop
+     * naturally continues the same line upward). sb_buffer is allocated to
+     * max(old_cols, new_cols), so the narrower request always fits. */
     while(new_row >= 0) {
-      if(!(screen->callbacks->sb_popline(old_cols, screen->sb_buffer, screen->cbdata)))
+      if(!(screen->callbacks->sb_popline(new_cols, screen->sb_buffer, screen->cbdata)))
         break;
 
       VTermPos pos = { .row = new_row };
-      for(pos.col = 0; pos.col < old_cols && pos.col < new_cols; pos.col += screen->sb_buffer[pos.col].width) {
+      for(pos.col = 0; pos.col < new_cols; pos.col += screen->sb_buffer[pos.col].width) {
         VTermScreenCell *src = &screen->sb_buffer[pos.col];
         ScreenCell *dst = &new_buffer[pos.row * new_cols + pos.col];
 
