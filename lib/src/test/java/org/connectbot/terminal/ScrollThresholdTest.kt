@@ -66,4 +66,22 @@ class ScrollThresholdTest {
         assertTrue("one wheel event per ${mmPerEvent}mm is too twitchy", mmPerEvent >= 1.0f)
         assertTrue("one wheel event per ${mmPerEvent}mm would feel sluggish", mmPerEvent <= 6.0f)
     }
+
+    // #524: the host coarsens the per-event quantum for swipe-arrows mode so
+    // one deliberate swipe steps history entry by entry.
+    @Test
+    fun `callback quantum multiplies the content-scroll threshold`() {
+        assertEquals(
+            scrollThresholdPx(2.625f) * 4f,
+            callbackScrollThresholdPx(2.625f, 4f),
+            0.001f,
+        )
+    }
+
+    /** A multiplier below 1 must not make scrolling twitchier than the default. */
+    @Test
+    fun `callback quantum clamps sub-1 multipliers to the content default`() {
+        assertEquals(scrollThresholdPx(3f), callbackScrollThresholdPx(3f, 0.25f), 0.001f)
+        assertEquals(scrollThresholdPx(3f), callbackScrollThresholdPx(3f, 1f), 0.001f)
+    }
 }

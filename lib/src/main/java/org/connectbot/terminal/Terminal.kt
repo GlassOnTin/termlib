@@ -268,6 +268,18 @@ private const val SCROLL_THRESHOLD_DP = 9f
 internal fun scrollThresholdPx(density: Float): Float = SCROLL_THRESHOLD_DP * density
 
 /**
+ * The per-event travel for one-finger scroll gestures routed to a
+ * [TerminalGestureCallback], scaled by the host's [multiplier]. Content
+ * scrolling wants the fine [SCROLL_THRESHOLD_DP] quantum; a swipe that steps
+ * a discrete cursor (swipe-arrows mode, #524) wants a far coarser one so a
+ * deliberate swipe walks history entry by entry instead of flinging through
+ * it. Clamped so a host value below 1 can't make scrolling twitchier than
+ * the content default. Pure for the same reason as [scrollThresholdPx].
+ */
+internal fun callbackScrollThresholdPx(density: Float, multiplier: Float): Float =
+    scrollThresholdPx(density) * multiplier.coerceAtLeast(1f)
+
+/**
  * Fraction of terminal height at top/bottom that triggers edge-scroll
  * when dragging selection near the boundary.
  */
@@ -490,6 +502,15 @@ fun Terminal(
     onComposeControllerAvailable: ((ComposeController) -> Unit)? = null,
     onFontSizeChanged: ((TextUnit) -> Unit)? = null,
     gestureCallback: TerminalGestureCallback? = null,
+    /**
+     * Multiplies the travel needed per [TerminalGestureCallback.onScroll]
+     * event for one-finger swipes. Hosts pass >1 when the callback maps
+     * swipes to discrete key steps (swipe-arrows mode, #524) so each arrow
+     * takes a deliberate fingertip of travel; 1 = the content-scroll feel.
+     * Values below 1 are clamped to 1. Content scrollback, edge-scroll and
+     * touchpad paths are unaffected.
+     */
+    scrollQuantumMultiplier: Float = 1f,
     allowStandardKeyboard: Boolean = false,
     rawKeyboardMode: Boolean = false,
     /**
@@ -573,6 +594,7 @@ fun Terminal(
         onComposeControllerAvailable = onComposeControllerAvailable,
         onFontSizeChanged = onFontSizeChanged,
         gestureCallback = gestureCallback,
+        scrollQuantumMultiplier = scrollQuantumMultiplier,
         allowStandardKeyboard = allowStandardKeyboard,
         rawKeyboardMode = rawKeyboardMode,
         customImeFlags = customImeFlags,
@@ -622,6 +644,8 @@ internal fun TerminalWithAccessibility(
     onComposeControllerAvailable: ((ComposeController) -> Unit)? = null,
     onFontSizeChanged: ((TextUnit) -> Unit)? = null,
     gestureCallback: TerminalGestureCallback? = null,
+    /** See [Terminal]'s scrollQuantumMultiplier (#524). */
+    scrollQuantumMultiplier: Float = 1f,
     allowStandardKeyboard: Boolean = false,
     rawKeyboardMode: Boolean = false,
     customImeFlags: ImeFlagBundle? = null,
@@ -661,6 +685,12 @@ internal fun TerminalWithAccessibility(
     // Density-scaled once here; every scroll site below uses this, never a raw
     // pixel count (#421).
     val scrollThreshold = scrollThresholdPx(density.density)
+    // Read through a State like mouseModeActive (#435): the pointerInput
+    // restarts when gestureCallback changes identity, but the multiplier can
+    // recompose independently and a captured Float would go stale.
+    val callbackScrollThreshold by rememberUpdatedState(
+        callbackScrollThresholdPx(density.density, scrollQuantumMultiplier),
+    )
     val clipboardManager = LocalClipboardManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val scope = rememberCoroutineScope()
@@ -2292,12 +2322,15 @@ internal fun TerminalWithAccessibility(
 
                                     GestureType.Scroll -> {
                                         if (gestureCallback != null) {
-                                            // Quantized scroll: accumulate drag and fire
-                                            // callback for each scrollThreshold crossed
+                                            // Quantized scroll: accumulate drag and fire the
+                                            // callback for each quantum crossed. The quantum is
+                                            // the host-scaled callbackScrollThreshold — coarser
+                                            // in swipe-arrows mode (#524), identical to
+                                            // scrollThreshold otherwise.
                                             accumulatedScrollY += dragAmount.y
-                                            while (kotlin.math.abs(accumulatedScrollY) >= scrollThreshold) {
+                                            while (kotlin.math.abs(accumulatedScrollY) >= callbackScrollThreshold) {
                                                 val draggedUp = accumulatedScrollY < 0
-                                                accumulatedScrollY += if (draggedUp) scrollThreshold else -scrollThreshold
+                                                accumulatedScrollY += if (draggedUp) callbackScrollThreshold else -callbackScrollThreshold
                                                 // Natural scrolling: finger down = scroll up (older content)
                                                 val scrollUp = !draggedUp
                                                 val col = (change.position.x / baseCharWidth).toInt()
@@ -2351,7 +2384,7 @@ internal fun TerminalWithAccessibility(
                                 GestureType.Scroll -> {
                                     // Flush any remaining accumulated scroll that didn't
                                     // reach the threshold — ensures small flicks register.
-                                    if (gestureCallback != null && kotlin.math.abs(accumulatedScrollY) > scrollThreshold / 3f) {
+                                    if (gestureCallback != null && kotlin.math.abs(accumulatedScrollY) > callbackScrollThreshold / 3f) {
                                         val scrollUp = accumulatedScrollY > 0 // natural: positive drag = scroll up
                                         val col = (down.position.x / baseCharWidth).toInt()
                                             .coerceIn(0, screenState.snapshot.cols - 1)
