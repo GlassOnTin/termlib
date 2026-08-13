@@ -21,7 +21,34 @@ val cmakeConfigureHost by tasks.registering(Exec::class) {
         "-B",
         hostJniDir.get().asFile.absolutePath,
         "-DCMAKE_BUILD_TYPE=Debug",
+        // Host ASan crash-regression tests (#533) — see CMakeLists.
+        "-DCB_TERM_HOST_TESTS=ON",
     )
+}
+
+val buildHostNativeTests by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Build the host ASan crash-regression tests (#533)"
+    dependsOn(cmakeConfigureHost)
+    // Shares the cmake build dir with cmakeBuildHost; order after it and
+    // claim only the test binary so their outputs don't overlap.
+    mustRunAfter(cmakeBuildHost)
+    inputs.dir(cppSourceDir)
+    commandLine(
+        "cmake",
+        "--build",
+        hostJniDir.get().asFile.absolutePath,
+        "--target",
+        "reflow_underflow_test",
+    )
+    outputs.file(hostJniDir.map { it.file("reflow_underflow_test") })
+}
+
+val runHostNativeTests by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Run the host ASan crash-regression tests (#533) — ASan aborts non-zero on a fault"
+    dependsOn(buildHostNativeTests)
+    commandLine(hostJniDir.get().file("reflow_underflow_test").asFile.absolutePath)
 }
 
 val cmakeBuildHost by tasks.registering(Exec::class) {
@@ -101,6 +128,11 @@ android {
             isIncludeAndroidResources = true
             all { testTask ->
                 testTask.dependsOn(cmakeBuildHost)
+                // The unit-test run is also what executes the host ASan
+                // crash-regression tests (#533) — a JVM test provably could
+                // not catch the reflow heap underflow (slop reads pass), so
+                // the native gate rides the same task CI already runs.
+                testTask.dependsOn(runHostNativeTests)
                 testTask.jvmArgs("-Djava.library.path=${hostJniDir.get().asFile.absolutePath}")
             }
         }

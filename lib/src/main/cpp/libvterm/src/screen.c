@@ -534,7 +534,17 @@ static void resize_buffer(VTermScreen *screen, int bufidx, int new_rows, int new
   while(old_row >= 0) {
     int old_row_end = old_row;
     /* TODO: Stop if dwl or dhl */
-    while(REFLOW && old_lineinfo && old_row >= 0 && old_lineinfo[old_row].continuation)
+    /* HAVEN PATCH (#533): stop the chain walk AT row 0, never below it.
+     * lineinfo[0].continuation == 1 is a normal state — a soft-wrapped line
+     * whose head has scrolled into scrollback leaves its continuation row on
+     * top — and the upstream `old_row >= 0` guard walks old_row to -1 in
+     * that state. old_row_start = -1 then makes the copy below read
+     * old_buffer[-old_cols]: a heap underflow that segfaults whenever the
+     * buffer is mmap-backed (large screens). The chain's true head lives in
+     * scrollback, which this walk can never reach, so treating row 0 as the
+     * chain start loses nothing. Reproduced under ASan with the exact
+     * reporter stack (resize_buffer <- resize <- on_resize). */
+    while(REFLOW && old_lineinfo && old_row > 0 && old_lineinfo[old_row].continuation)
       old_row--;
     int old_row_start = old_row;
 

@@ -114,4 +114,40 @@ class ZoomScrollbackIntegrityTest {
             after.contains(marker) || after.joinToString("").contains(marker),
         )
     }
+
+    // #533: a soft-wrapped line whose head has scrolled into scrollback leaves
+    // ROW 0 flagged as a continuation — a perfectly normal state — and the
+    // reflow chain walk used to decrement past it to row -1, making the copy
+    // read old_buffer[-old_cols]: a heap underflow that segfaults whenever
+    // the buffer is mmap-backed (the reporter's phone). Reproduced and fixed
+    // at the C layer under ASan with the reporter's exact stack; this guards
+    // the emulator-visible contract — the resize survives and no content is
+    // replaced by out-of-bounds garbage.
+    @Test
+    fun `resize with a continuation row at the top of the screen keeps content intact`() = runBlocking {
+        val emulator = TerminalEmulatorFactory.create(initialRows = 5, initialCols = 20)
+            as TerminalEmulatorImpl
+        // 100 As wrap across all 5 rows; two short lines scroll the head into
+        // scrollback, so the top screen row is a continuation row.
+        emulator.writeInput(("A".repeat(100) + "\r\nx\r\ny\r\n").toByteArray())
+        delay(150)
+
+        // Widening only: a shrink can legitimately clip chain rows that fall
+        // off the top (a separate, pre-existing reflow limitation — measured
+        // at 10 lost cells for a 5x12 shrink); widening cannot, so any loss
+        // here is the underflow copy replacing real cells with garbage.
+        emulator.resize(5, 30)
+        delay(150)
+        emulator.resize(5, 80)
+        delay(150)
+
+        val after = allText(emulator)
+        assertEquals(
+            "reflowing with a continuation row on top corrupted the content — " +
+                "the 100-A run must survive widening resizes in full. Got:\n" +
+                after.joinToString("\n"),
+            100,
+            after.sumOf { line -> line.count { it == 'A' } },
+        )
+    }
 }
