@@ -40,6 +40,27 @@ interface TerminalGestureCallback {
     fun onScroll(col: Int, row: Int, scrollUp: Boolean): Boolean = false
 
     /**
+     * A one-finger swipe has just been classified, offered as a *held*
+     * gesture before any [onScroll] quantization (#524). Return `true` to
+     * claim it: the host then receives [onSwipeHold] whenever the finger
+     * reverses along the gesture's axis and [onSwipeHoldEnd] exactly once
+     * when the finger lifts (or the gesture is cancelled) — and no
+     * [onScroll] events are emitted for the remainder of the gesture.
+     * Hosts use this to run their own press-and-hold key repeat: direction
+     * selects the key, holding repeats it, lifting stops — distance
+     * deliberately does not matter. Return `false` (the default) for the
+     * classic quantized [onScroll] behaviour; horizontal swipes then stay
+     * unclaimed for the host pager as before.
+     */
+    fun onSwipeHoldStart(col: Int, row: Int, direction: SwipeHoldDirection): Boolean = false
+
+    /** The held swipe's finger reversed along its axis (#524). */
+    fun onSwipeHold(direction: SwipeHoldDirection) {}
+
+    /** The held swipe ended — finger lifted or gesture cancelled (#524). */
+    fun onSwipeHoldEnd() {}
+
+    /**
      * Mouse drag while a button is held. Called once at [MouseDragPhase.Start]
      * (when the press is first promoted to a drag), repeatedly at
      * [MouseDragPhase.Move] for each cell change, and once at
@@ -69,4 +90,15 @@ enum class MouseDragPhase {
     Start,
     Move,
     End,
+}
+
+/**
+ * Direction of a held one-finger swipe, in literal finger terms.
+ * See [TerminalGestureCallback.onSwipeHoldStart]. (#524)
+ */
+enum class SwipeHoldDirection {
+    Up,
+    Down,
+    Left,
+    Right,
 }

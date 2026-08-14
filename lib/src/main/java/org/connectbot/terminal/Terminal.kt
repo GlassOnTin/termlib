@@ -144,6 +144,15 @@ private enum class GestureType {
      * [MouseDragPhase.Start]). (#94, #186)
      */
     MouseDrag,
+
+    /**
+     * A held one-finger swipe claimed by the host via
+     * [TerminalGestureCallback.onSwipeHoldStart] (#524): the host runs its
+     * own key repeat from press-and-hold; the terminal only reports axis
+     * reversals ([TerminalGestureCallback.onSwipeHold]) and the release
+     * ([TerminalGestureCallback.onSwipeHoldEnd]). No [onScroll] quanta.
+     */
+    SwipeHold,
 }
 
 /**
@@ -2067,6 +2076,12 @@ internal fun TerminalWithAccessibility(
                             var accumulatedScrollY = 0f
                             // Track whether this is a horizontal drag (tab swipe)
                             var isHorizontalDrag = false
+                            // Held-swipe state (#524): the current direction and
+                            // the travel accumulated AGAINST it. A reversal only
+                            // fires once the counter-travel passes touch slop, so
+                            // finger jitter doesn't flicker the direction.
+                            var swipeHoldDirection = SwipeHoldDirection.Up
+                            var swipeHoldFlipAccum = 0f
                             // Last cell coordinates dispatched as a MouseDrag(Move),
                             // used to quantize per-pixel events down to per-cell.
                             var lastMouseDragCol = -1
@@ -2206,12 +2221,23 @@ internal fun TerminalWithAccessibility(
                                             val absDx = kotlin.math.abs(totalDx)
                                             val absDy = kotlin.math.abs(totalDy)
                                             if (absDx > absDy) {
-                                                // Horizontal drag — clear stale selection, let pager handle
-                                                isHorizontalDrag = true
                                                 longPressJob.cancel()
                                                 callbackLongPressJob?.cancel()
                                                 if (selectionManager.mode != SelectionMode.NONE) {
                                                     selectionManager.clearSelection()
+                                                }
+                                                // Offer the swipe as a held gesture first
+                                                // (#524): a host in swipe-arrows mode claims
+                                                // it and owns ←/→ key repeat; unclaimed
+                                                // horizontal drags stay with the pager.
+                                                val holdDir = if (totalDx > 0) SwipeHoldDirection.Right else SwipeHoldDirection.Left
+                                                if (gestureCallback?.onSwipeHoldStart(downCol, downRow, holdDir) == true) {
+                                                    swipeHoldDirection = holdDir
+                                                    swipeHoldFlipAccum = 0f
+                                                    gestureType = GestureType.SwipeHold
+                                                } else {
+                                                    // Horizontal drag — let pager handle
+                                                    isHorizontalDrag = true
                                                 }
                                             } else {
                                                 // Vertical swipe → Scroll. In mouse mode this
@@ -2224,7 +2250,16 @@ internal fun TerminalWithAccessibility(
                                                 // over the same gesture. (#186)
                                                 longPressJob.cancel()
                                                 callbackLongPressJob?.cancel()
-                                                gestureType = GestureType.Scroll
+                                                // Offer as a held gesture first (#524);
+                                                // unclaimed swipes keep quantized Scroll.
+                                                val holdDir = if (totalDy < 0) SwipeHoldDirection.Up else SwipeHoldDirection.Down
+                                                if (gestureCallback?.onSwipeHoldStart(downCol, downRow, holdDir) == true) {
+                                                    swipeHoldDirection = holdDir
+                                                    swipeHoldFlipAccum = 0f
+                                                    gestureType = GestureType.SwipeHold
+                                                } else {
+                                                    gestureType = GestureType.Scroll
+                                                }
                                             }
                                         }
                                         // else: a right-click long-press already fired and was
@@ -2364,6 +2399,38 @@ internal fun TerminalWithAccessibility(
                                         }
                                     }
 
+                                    GestureType.SwipeHold -> {
+                                        // Distance no longer matters (#524): only axis
+                                        // reversals do. Accumulate travel AGAINST the
+                                        // current direction; a reversal fires once it
+                                        // passes touch slop, so jitter can't flicker
+                                        // the held key. Same-direction travel resets
+                                        // the counter.
+                                        val axisDelta = when (swipeHoldDirection) {
+                                            SwipeHoldDirection.Up, SwipeHoldDirection.Down -> dragAmount.y
+                                            SwipeHoldDirection.Left, SwipeHoldDirection.Right -> dragAmount.x
+                                        }
+                                        val against = when (swipeHoldDirection) {
+                                            SwipeHoldDirection.Up, SwipeHoldDirection.Left -> axisDelta > 0f
+                                            SwipeHoldDirection.Down, SwipeHoldDirection.Right -> axisDelta < 0f
+                                        }
+                                        if (against) {
+                                            swipeHoldFlipAccum += kotlin.math.abs(axisDelta)
+                                            if (swipeHoldFlipAccum * swipeHoldFlipAccum > touchSlopSquared) {
+                                                swipeHoldDirection = when (swipeHoldDirection) {
+                                                    SwipeHoldDirection.Up -> SwipeHoldDirection.Down
+                                                    SwipeHoldDirection.Down -> SwipeHoldDirection.Up
+                                                    SwipeHoldDirection.Left -> SwipeHoldDirection.Right
+                                                    SwipeHoldDirection.Right -> SwipeHoldDirection.Left
+                                                }
+                                                swipeHoldFlipAccum = 0f
+                                                gestureCallback?.onSwipeHold(swipeHoldDirection)
+                                            }
+                                        } else if (axisDelta != 0f) {
+                                            swipeHoldFlipAccum = 0f
+                                        }
+                                    }
+
                                     else -> {}
                                 }
 
@@ -2455,6 +2522,13 @@ internal fun TerminalWithAccessibility(
                                             .coerceIn(0, screenState.snapshot.rows - 1)
                                     }
                                     gestureCallback?.onMouseDrag(endCol, endRow, MouseDragPhase.End)
+                                }
+
+                                GestureType.SwipeHold -> {
+                                    // The host's key repeat runs until the finger
+                                    // lifts — exactly one End per claimed gesture,
+                                    // on release or cancellation alike (#524).
+                                    gestureCallback?.onSwipeHoldEnd()
                                 }
 
                                 GestureType.Undetermined -> {
