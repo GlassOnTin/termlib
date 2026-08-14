@@ -1891,7 +1891,13 @@ internal fun TerminalWithAccessibility(
                                 // ENDED — so the real finger-down duration, the
                                 // one measurement the diagnosis needed, was never
                                 // recorded at all (#435).
-                                Log.d(
+                                // Log.i, not Log.d: release builds strip debug
+                                // logging, and this line is the only record of
+                                // which path claimed a swipe — the exact datum
+                                // a misbehaving-gesture report needs (#542). One
+                                // line per gesture outcome, geometry and timing
+                                // only, so it is cheap and content-free.
+                                Log.i(
                                     "HavenGesture",
                                     gestureLogLine(
                                         outcome = outcome,
