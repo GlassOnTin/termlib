@@ -1425,9 +1425,20 @@ internal fun TerminalWithAccessibility(
         }
 
         // Sync scrollOffset when scrollbackPosition changes externally (but not during user scrolling)
+        //
+        // "Externally" is load-bearing (#542): the drag path derives the position
+        // FROM the offset with an integer floor, so during a drag the offset is
+        // always within one line of position*charHeight — and snapping it to the
+        // floor here hands back the fraction the floor just took. On an upward
+        // drag those two floors compound into a full line lost per pointer
+        // event (~10x the finger), which is the runaway-scroll bug. A real
+        // external move (scroll controller, keyboard reset, output shift) puts
+        // the offset a whole line or more away — only then reconcile.
         LaunchedEffect(screenState.scrollbackPosition) {
             val targetOffset = screenState.scrollbackPosition * baseCharHeight
-            if (!scrollOffset.isRunning && scrollOffset.value != targetOffset) {
+            if (!scrollOffset.isRunning &&
+                kotlin.math.abs(scrollOffset.value - targetOffset) >= baseCharHeight
+            ) {
                 scrollOffset.snapTo(targetOffset)
             }
         }
