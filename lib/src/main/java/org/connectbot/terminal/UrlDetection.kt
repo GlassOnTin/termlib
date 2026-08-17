@@ -14,6 +14,30 @@ internal fun Char.isUrlSafe(): Boolean = isLetterOrDigit() || this in "/:@!$&'()
 internal fun Char.isUrlPrefixDecoration(): Boolean = this in "|│├└┌┬┼`>•●⎿\""
 
 /**
+ * True when EVERY column of a row is URL-safe — the signature of a row that a
+ * wrapped URL ran straight through, edge to edge, with no room for anything
+ * else.
+ *
+ * This is the one unambiguous continuation signal available when the emitting
+ * program hard-wraps at its own width and the emulator therefore records no
+ * soft-wrap flag. Prose cannot look like this: [Char.isUrlSafe] excludes the
+ * space, so a single space anywhere in the row disqualifies it. That is what
+ * makes it safe to keep walking past the row caps, which exist to stop
+ * unrelated rows being glued into an invented URL.
+ *
+ * Deliberately strict — a row one column short does not qualify. The final row
+ * of a wrap is padded and so never saturated, which is correct: it is the row
+ * that ends the walk.
+ */
+internal inline fun isSaturatedUrlRow(cols: Int, charAt: (Int) -> Char): Boolean {
+    if (cols <= 0) return false
+    for (c in 0 until cols) {
+        if (!charAt(c).isUrlSafe()) return false
+    }
+    return true
+}
+
+/**
  * Regexes intentionally match URL-ish spans broadly; trim punctuation that is
  * usually prose around a URL rather than part of it.
  */

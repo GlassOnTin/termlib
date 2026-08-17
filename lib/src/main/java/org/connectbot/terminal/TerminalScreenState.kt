@@ -266,7 +266,16 @@ internal class TerminalScreenState(
         var row = anchorRow
         var startCol = anchorCol
 
-        while (row < snapshot.rows && (row - anchorRow) < MAX_URL_CONTINUATION_ROWS) {
+        // The row cap applies only to AMBIGUOUS continuations. A row that is
+        // URL-safe in every column was run straight through by the wrap and
+        // cannot be prose (a single space would disqualify it), so walking past
+        // it costs none of the safety the cap buys. Without this a URL wrapped
+        // over more rows than the cap — a 9-row OAuth URL in a 54-column tab —
+        // resolved to its first MAX_URL_CONTINUATION_ROWS rows and opened
+        // truncated.
+        while (row < snapshot.rows &&
+            ((row - anchorRow) < MAX_URL_CONTINUATION_ROWS || isSaturatedRow(row - 1))
+        ) {
             val text = getVisibleLine(row).columnText
             if (startCol !in text.indices || !text[startCol].isUrlSafe()) break
 
@@ -291,6 +300,14 @@ internal class TerminalScreenState(
         }
 
         return spans
+    }
+
+    /** See [isSaturatedUrlRow] — a row the wrap filled edge to edge. */
+    private fun isSaturatedRow(row: Int): Boolean {
+        if (row !in 0 until snapshot.rows) return false
+        val text = getVisibleLine(row).columnText
+        if (text.length < snapshot.cols) return false
+        return isSaturatedUrlRow(snapshot.cols) { text[it] }
     }
 
     private fun continuationStart(previousRow: Int, previousEndCol: Int): Int? {

@@ -66,6 +66,10 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
 
     private val structural: Array<BooleanArray> by lazy { computeStructural() }
 
+    /** See [isSaturatedUrlRow] — a row the wrap filled edge to edge. */
+    private fun isSaturatedRow(r: Int): Boolean =
+        r in 0 until rows && isSaturatedUrlRow(cols) { cellChar[r][it] }
+
     /** Entry point. Returns the full URL covering the tap, or null. */
     fun detect(tapRow: Int, tapCol: Int): String? {
         if (tapRow !in 0 until rows || tapCol !in 0 until cols) return null
@@ -76,7 +80,15 @@ internal class UrlBlobDetector(private val state: TerminalScreenState) {
         // back — URL wraps rarely span more than that.
         var anchorRow = -1
         var anchorStartCol = -1
-        for (r in tapRow downTo maxOf(0, tapRow - MAX_UPWARD_ROWS)) {
+        // How far up to look. MAX_UPWARD_ROWS covers the ambiguous cases
+        // (decorated or short continuation rows); beyond that, keep climbing
+        // while the row ABOVE is URL-safe in every column, because such a row
+        // was run through by the wrap and cannot be prose. Tapping the 7th row
+        // of a 9-row wrap used to find no anchor at all and open nothing.
+        var searchFloor = tapRow
+        while (searchFloor > 0 && isSaturatedRow(searchFloor - 1)) searchFloor--
+        searchFloor = minOf(searchFloor, tapRow - MAX_UPWARD_ROWS).coerceAtLeast(0)
+        for (r in tapRow downTo searchFloor) {
             val (found, startCol) = findAnchorInRow(r)
             if (found) {
                 anchorRow = r
