@@ -65,6 +65,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
@@ -104,6 +105,7 @@ import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.ScrollAxisRange
@@ -123,6 +125,7 @@ import androidx.core.view.WindowInsetsCompat
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.ceil
 
@@ -1355,6 +1358,7 @@ internal fun TerminalWithAccessibility(
         // Resize terminal when the sizing dimensions change. On the primary
         // buffer a soft-keyboard toggle leaves the row count unchanged (#206);
         // on the alternate buffer it follows the visible height.
+        val windowInfo = LocalWindowInfo.current
         LaunchedEffect(terminalEmulator, availableWidth, sizingHeight, forcedSize, baseCharWidth, baseCharHeight) {
             if (availableWidth == 0 || sizingHeight == 0 || baseCharWidth <= 0f || baseCharHeight <= 0f) {
                 return@LaunchedEffect
@@ -1377,8 +1381,30 @@ internal fun TerminalWithAccessibility(
             // Without this, libvterm's inactive-buffer resize fills new cells
             // using the active buffer's drawing pen — leaking a mid-redraw
             // foreground app's pen colour into the primary buffer.
+            //
+            // #554: a row GROW on the reflow-to-keyboard path is what a
+            // keyboard hide looks like, and Android hides the IME a few
+            // hundred ms BEFORE the pause when the app is being backgrounded
+            // (#515), while the window is still focused. Waiting the longer
+            // debounce lets the focus loss arrive first, so a backgrounding
+            // round-trip with the keyboard up never SIGWINCHes the guest
+            // (zellij/tmux would repaint on return for no visible reason).
+            // The cost is a user-initiated keyboard dismiss reflowing ~300ms
+            // later in a full-screen TUI.
             if (initialResizeDone) {
-                delay(80)
+                delay(resizeDebounceMs(reflowToKeyboard, growingRows = newRows > dimensions.rows))
+                if (!windowInfo.isWindowFocused) {
+                    // Backgrounded (or another window took focus) with a
+                    // resize pending: hold it. On return, the #515 IME
+                    // restore re-shrinks the insets, which changes
+                    // sizingHeight and cancels this effect — the rerun sees
+                    // unchanged dimensions and no resize happens at all. The
+                    // grace only expires (and the resize applies) when no
+                    // restore is coming, e.g. the keyboard was genuinely
+                    // dismissed or a physical keyboard is attached.
+                    snapshotFlow { windowInfo.isWindowFocused }.first { it }
+                    delay(IME_RESTORE_GRACE_MS)
+                }
             }
 
             terminalEmulator.resize(newRows, newCols)
@@ -3322,6 +3348,34 @@ internal fun edgeScrollRowsPerTick(
  * toggle keeps the no-resize render-shift and never SIGWINCHes the shell.
  */
 internal fun shouldReflowToKeyboard(altScreen: Boolean, reflowOnKeyboard: Boolean): Boolean = altScreen || reflowOnKeyboard
+
+/** Debounce for a shrink, a width change, or any primary-buffer resize. */
+internal const val RESIZE_DEBOUNCE_MS = 80L
+
+/**
+ * Debounce for a row GROW on the reflow-to-keyboard path (#554). Must exceed
+ * the gap between Android taking the IME down for a backgrounding and the
+ * window-focus loss that follows (a few hundred ms, see
+ * IME_BACKGROUND_HIDE_WINDOW_MS on the host side), so the focus check after
+ * the delay can tell a backgrounding from a user keyboard dismiss.
+ */
+internal const val KEYBOARD_HIDE_RESIZE_DEBOUNCE_MS = 400L
+
+/**
+ * How long after window focus returns to keep holding a pending resize (#554),
+ * giving the #515 IME restore (focus-gain tick -> showIme -> inset animation
+ * start) time to change sizingHeight and cancel the resize entirely.
+ */
+internal const val IME_RESTORE_GRACE_MS = 600L
+
+/**
+ * Which debounce a pending PTY resize gets before it is committed (#554): a
+ * row grow while reflowed-to-keyboard is keyboard-hide-shaped and waits long
+ * enough for a backgrounding's focus loss to arrive; everything else keeps the
+ * short pen-leak debounce.
+ */
+internal fun resizeDebounceMs(reflowToKeyboard: Boolean, growingRows: Boolean): Long =
+    if (reflowToKeyboard && growingRows) KEYBOARD_HIDE_RESIZE_DEBOUNCE_MS else RESIZE_DEBOUNCE_MS
 
 /**
  * Vertical distance (px) to translate the rendered grid UP so the bottom-most

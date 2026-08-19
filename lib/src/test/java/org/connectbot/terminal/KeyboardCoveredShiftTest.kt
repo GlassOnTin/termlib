@@ -156,4 +156,31 @@ class KeyboardCoveredShiftTest {
         // the top when the keyboard appears (the tmux-crop fix).
         assertEquals(true, shouldReflowToKeyboard(altScreen = false, reflowOnKeyboard = true))
     }
+
+    // resizeDebounceMs (#554): a row grow while reflowed-to-keyboard is
+    // keyboard-hide-shaped and must out-wait the hide→focus-loss gap of a
+    // backgrounding; everything else keeps the short pen-leak debounce.
+
+    @Test
+    fun debounce_keyboardHideShapedGrowWaitsForFocusLoss() {
+        assertEquals(
+            KEYBOARD_HIDE_RESIZE_DEBOUNCE_MS,
+            resizeDebounceMs(reflowToKeyboard = true, growingRows = true),
+        )
+        // The backgrounding IME hide precedes the pause by a few hundred ms
+        // (#515); a debounce at or below that gap would commit the grow while
+        // the window is still focused and defeat the hold.
+        assertEquals(true, KEYBOARD_HIDE_RESIZE_DEBOUNCE_MS >= 400L)
+    }
+
+    @Test
+    fun debounce_shrinkAndPrimaryBufferKeepShortDebounce() {
+        // Shrinks (keyboard appearing / IME restore animation) and primary-
+        // buffer resizes must stay fast: the restore animation cancels the
+        // effect every step, and only a short trailing debounce keeps the
+        // final size responsive.
+        assertEquals(RESIZE_DEBOUNCE_MS, resizeDebounceMs(reflowToKeyboard = true, growingRows = false))
+        assertEquals(RESIZE_DEBOUNCE_MS, resizeDebounceMs(reflowToKeyboard = false, growingRows = true))
+        assertEquals(RESIZE_DEBOUNCE_MS, resizeDebounceMs(reflowToKeyboard = false, growingRows = false))
+    }
 }
