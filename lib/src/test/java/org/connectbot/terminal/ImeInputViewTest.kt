@@ -30,6 +30,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -1407,6 +1408,201 @@ class ImeInputViewTest {
             view.showIme()
 
             assertFalse("must stay unfocused while the window is hidden", view.isFocused)
+        }
+    }
+
+    // === Compose interop teardown guard (the exact form of the above) ===
+    //
+    // The window-visibility drop is timing-based: it re-takes focus
+    // REFOCUS_DELAY_MS after the window returns, on the assumption that
+    // Compose's deferred disposal flush has already run. A Xiaomi Mi 17
+    // (HyperOS/Android 16) runs that flush later, so the view is focused again
+    // when AndroidViewHolder.onDeactivate() finally calls
+    // removeAllViewsInLayout(). onInteropReset() is wired into the AndroidView
+    // reset block, which Compose invokes on the same stack frame immediately
+    // before that removal, so it does not depend on timing at all.
+    //
+    // The observable signature of the crashing branch is that removing a
+    // FOCUSED child sends ViewGroup through rootViewRequestFocus() — a focus
+    // request from the root of the tree, which on the device re-enters the
+    // half-disposed AndroidComposeView. Here there is no Compose hierarchy to
+    // re-enter, so a plain focusable sibling acts as the canary: it can only
+    // gain focus if that root-level request ran.
+
+    private class InteropTeardownFixture(context: Context, val view: ImeInputView) {
+        val canary = View(context).apply {
+            isFocusable = true
+            isFocusableInTouchMode = true
+        }
+        val holder = android.widget.FrameLayout(context)
+        val root = android.widget.LinearLayout(context).apply {
+            addView(canary, android.view.ViewGroup.LayoutParams(SIZE, SIZE))
+            addView(holder, android.view.ViewGroup.LayoutParams(SIZE, SIZE))
+        }
+
+        init {
+            holder.addView(view, android.view.ViewGroup.LayoutParams(SIZE, SIZE))
+            val activity = org.robolectric.Robolectric
+                .buildActivity(android.app.Activity::class.java).setup().get()
+            activity.setContentView(root)
+            // View.canTakeFocus() refuses a zero-sized view once layout is
+            // valid (sCanFocusZeroSized is false from targetSdk P). Robolectric
+            // lays the content view out, so without a real size every
+            // requestFocus() below silently returns false.
+            listOf(root, canary, holder, view).forEach { it.layout(0, 0, SIZE, SIZE) }
+        }
+
+        private companion object {
+            const val SIZE = 16
+        }
+    }
+
+    private fun interopFixture(): InteropTeardownFixture =
+        InteropTeardownFixture(context, makeView())
+
+    @Test
+    fun testRemovingFocusedInteropChildRefocusesFromRoot() {
+        // Pins the branch the guard exists to avoid. If this ever stops
+        // holding, the framework changed and the guard's rationale needs
+        // re-checking — it does not mean the guard is unnecessary.
+        val f = interopFixture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            assertTrue("precondition: interop view focused", f.view.requestFocus())
+
+            f.holder.removeAllViewsInLayout()
+
+            assertTrue(
+                "removal of a focused child must re-request focus from the root",
+                f.canary.isFocused,
+            )
+        }
+    }
+
+    @Test
+    fun testInteropResetPreventsRootRefocusOnRemoval() {
+        val f = interopFixture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            assertTrue("precondition: interop view focused", f.view.requestFocus())
+
+            // Exactly what Compose does: reset block, then the removal.
+            f.view.onInteropReset()
+
+            // The ancestors' record of the focused child is what
+            // removeAllViewsInLayout() reads; the view's own focus is kept on
+            // purpose, so the chain can be restored when it is re-added.
+            assertNull("holder has no focused child", f.holder.focusedChild)
+            assertTrue("view keeps its own focus", f.view.isFocused)
+
+            f.holder.removeAllViewsInLayout()
+
+            assertFalse(
+                "no root-level focus request may run during teardown",
+                f.canary.isFocused,
+            )
+        }
+    }
+
+    @Test
+    fun testInteropResetKeepsTheViewFocusableAndFocused() {
+        // The teardown must NOT drop FOCUSABLE and must NOT clearFocus():
+        // both give focus up through the public clearFocus(), which calls
+        // rootViewRequestFocus() — the crash. Only the ancestors' record of
+        // the focused child is cleared; the view's own focus survives, which
+        // is what lets addViewInner() restore the chain when Compose puts it
+        // back.
+        val f = interopFixture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            f.view.requestFocus()
+
+            f.view.onInteropReset()
+
+            assertTrue("still focusable", f.view.isFocusable)
+            assertTrue("still holds focus itself", f.view.isFocused)
+        }
+    }
+
+    @Test
+    fun testInteropTeardownRoundTripRestoresTheFocusChain() {
+        // The whole AndroidViewHolder.onDeactivate() / onReuse() cycle:
+        // reset, removeAllViewsInLayout(), then addView() when the page comes
+        // back. Focus has to come back with it, without a timer.
+        val f = interopFixture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            f.view.requestFocus()
+
+            f.view.onInteropReset()
+            f.holder.removeAllViewsInLayout()
+
+            assertFalse("no root-level focus request during teardown", f.canary.isFocused)
+
+            f.holder.addView(f.view, android.view.ViewGroup.LayoutParams(16, 16))
+            f.view.layout(0, 0, 16, 16)
+
+            assertSame("focus chain restored on re-add", f.view, f.holder.focusedChild)
+            assertTrue("view focused again", f.view.isFocused)
+        }
+    }
+
+    @Test
+    fun testInteropUpdateRepairsTheChainAfterAResetWithoutDetach() {
+        // onReuse() calls the reset block WITHOUT removing the view when it is
+        // still parented, so no detach/attach pair follows and nothing else
+        // would ever reconnect the chain.
+        val f = interopFixture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            f.view.requestFocus()
+            f.view.onInteropReset()
+            assertNull("precondition: chain broken", f.holder.focusedChild)
+
+            f.view.onInteropUpdate()
+
+            assertSame("chain repaired", f.view, f.holder.focusedChild)
+            assertFalse("repair must not hand focus to a sibling", f.canary.isFocused)
+        }
+    }
+
+    @Test
+    fun testInteropUpdateIsANoOpOutsideATeardown() {
+        val f = interopFixture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            f.canary.requestFocus()
+
+            f.view.onInteropUpdate()
+
+            assertTrue("must not steal focus on an ordinary update", f.canary.isFocused)
+            assertFalse(f.view.isFocused)
+        }
+    }
+
+    @Test
+    fun testInteropTeardownDetachDoesNotDropFocusable() {
+        // The detach inside removeAllViewsInLayout() dispatches GONE, which
+        // normally drops FOCUSABLE — and that drop calls
+        // rootViewRequestFocus(). During a teardown it must be suppressed.
+        val f = interopFixture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            f.view.requestFocus()
+
+            f.view.onInteropReset()
+            f.holder.removeAllViewsInLayout()
+
+            assertFalse("no root-level focus request on the GONE dispatch", f.canary.isFocused)
+            assertTrue("FOCUSABLE untouched during teardown", f.view.isFocusable)
+        }
+    }
+
+    @Test
+    fun testWindowHiddenOutsideATeardownStillDropsFocusable() {
+        // The ordinary background path is unchanged: no teardown flag, so the
+        // window-invisible drop still applies.
+        val f = interopFixture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            f.view.requestFocus()
+
+            f.view.dispatchWindowVisibilityChanged(View.GONE)
+
+            assertFalse("unfocusable while hidden", f.view.isFocusable)
+            assertFalse("unfocused while hidden", f.view.isFocused)
         }
     }
 }

@@ -23,6 +23,7 @@ import android.text.Selection
 import android.util.Log
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.ExtractedText
@@ -48,7 +49,14 @@ import androidx.compose.ui.input.key.KeyEvent as ComposeKeyEvent
  */
 internal class ImeInputView(
     context: Context,
-    private val keyboardHandler: KeyboardHandler,
+    /**
+     * Re-assignable because the hosting AndroidView is a *reusable* Compose
+     * node (it supplies an `onReset` block — see [onInteropReset]). A reused
+     * node keeps this View instance and does not re-run the factory, so the
+     * handler has to be refreshed from the AndroidView `update` block instead
+     * of being captured once at construction.
+     */
+    internal var keyboardHandler: KeyboardHandler,
     internal val inputMethodManager: InputMethodManager =
         context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager,
     internal val onUpdateSelection: (view: View, selStart: Int, selEnd: Int, candidatesStart: Int, candidatesEnd: Int) -> Unit =
@@ -227,9 +235,11 @@ internal class ImeInputView(
      * request re-enters the half-disposed AndroidComposeView →
      * IllegalStateException "Searching for active node in inactive hierarchy".
      * The freeze always passes through window-invisible first, so dropping
-     * focus here disarms that branch. Focus is re-taken when the window is
-     * visible again, posted past the return frame (which is when the deferred
-     * disposal flush runs) and guarded on still being attached.
+     * focus here disarms that branch for as long as the window is away. It is
+     * no longer the whole guard: the refocus below is on a fixed delay, and a
+     * Xiaomi Mi 17 runs the deferred disposal flush *after* that delay expires.
+     * [onInteropReset] closes that window; the delay here is now only about
+     * when the user gets their keyboard back, not about crash safety.
      */
     private val restoreFocusRunnable = Runnable {
         if (isAttachedToWindow && !isFocusable) {
@@ -253,12 +263,17 @@ internal class ImeInputView(
             // A restore pending from a brief show must not fire while hidden —
             // it would re-arm the crash for the next warm return.
             removeCallbacks(restoreFocusRunnable)
-            if (isFocused) {
-                // Dropping FOCUSABLE clears focus as a side effect while the
-                // flag is already unset, so neither clearFocus()'s
-                // rootViewRequestFocus() nor focusableViewAvailable() can hand
-                // focus back. Stays unfocusable for the whole hidden period;
-                // `!isFocusable` doubles as the "restore on visible" marker.
+            // Not during a Compose interop teardown: the detach that follows
+            // [onInteropReset] dispatches GONE from inside
+            // removeAllViewsInLayout(), and dropping FOCUSABLE there would run
+            // the rootViewRequestFocus() that onInteropReset exists to avoid.
+            if (isFocused && !interopTeardown) {
+                // Dropping FOCUSABLE gives focus up via clearFocus(), so a
+                // root-level focus request does run — harmless here, where the
+                // Compose hierarchy is alive, and it cannot land back on this
+                // view because the flag is already unset by then. Stays
+                // unfocusable for the whole hidden period; `!isFocusable`
+                // doubles as the "restore on visible" marker.
                 isFocusable = false
             }
         } else if (!isFocusable) {
@@ -266,8 +281,80 @@ internal class ImeInputView(
         }
     }
 
+    /**
+     * True from [onInteropReset] until the detach that Compose's teardown
+     * performs immediately afterwards. Marks the one window in which this
+     * view must not touch its own FOCUSABLE flag — see below.
+     */
+    private var interopTeardown = false
+
+    /**
+     * Surrender this view's place in the focus chain for the Compose interop
+     * teardown that is about to run. Wired in as the `onReset`/`onRelease`
+     * block of the hosting [androidx.compose.ui.viewinterop.AndroidView].
+     *
+     * Compose 1.12.0's `AndroidViewHolder.onDeactivate()` is, in full,
+     * `reset(); removeAllViewsInLayout()` — verified from the shipped
+     * bytecode — so the reset block runs on the same stack frame, immediately
+     * before the removal that inspects `mFocused`. That makes it the one place
+     * where the guard holds whatever the device's frame timing is, which the
+     * window-visibility drop below could only approximate: it assumed the
+     * deferred disposal flush had already run [REFOCUS_DELAY_MS] after the
+     * window came back, and on a Xiaomi Mi 17 (HyperOS, Android 16)
+     * `outOfFrameRunnable` fires the deactivation later than that.
+     *
+     * What is NOT usable here is `clearFocus()` — or dropping FOCUSABLE, which
+     * amounts to the same thing. `View.setFlags` gives up focus by calling the
+     * public `clearFocus()` (AOSP 16, the FOCUSABLE branch), and that is
+     * `clearFocusInternal(refocus = true)`, i.e. it calls
+     * `rootViewRequestFocus()` itself. Inside the teardown a root-level focus
+     * request is precisely the crash: it re-enters the half-disposed
+     * AndroidComposeView → IllegalStateException "Searching for active node in
+     * inactive hierarchy". Pinned by
+     * `testInteropResetPreventsRootRefocusOnRemoval`.
+     *
+     * `ViewGroup.clearChildFocus()` is the primitive that does not: it nulls
+     * `mFocused` up the parent chain and `ViewRootImpl` answers it by only
+     * scheduling a traversal. `removeAllViewsInLayout()` then sees no focused
+     * child and never takes the `rootViewRequestFocus()` branch.
+     *
+     * This view keeps its own PFLAG_FOCUSED, deliberately: `addViewInner()`
+     * re-establishes the chain for a re-added child that still has focus, so
+     * when `AndroidViewHolder.onReuse()` puts the view back, focus — and with
+     * it the keyboard — returns by itself, with no timer and no second focus
+     * request.
+     */
+    internal fun onInteropReset() {
+        removeCallbacks(restoreFocusRunnable)
+        if (!isFocused) return
+        interopTeardown = true
+        (parent as? ViewGroup)?.clearChildFocus(this)
+    }
+
+    /**
+     * Put the focus chain back when the teardown did not actually detach this
+     * view. Wired in as the tail of the hosting AndroidView's `update` block.
+     *
+     * `AndroidViewHolder.onReuse()` calls the reset block *without* removing
+     * the view when it finds it still parented, so no detach/attach pair
+     * follows and `addViewInner()` never gets to re-establish the chain that
+     * [onInteropReset] broke. Left alone, this view would believe it holds
+     * focus while every ancestor believes nothing does — a terminal that
+     * silently refuses input (#476). The composition is active again by the
+     * time `update` runs, so a targeted `requestChildFocus` is safe; it is a
+     * chain repair, not a focus search, and cannot reach the root.
+     */
+    internal fun onInteropUpdate() {
+        if (!interopTeardown || !isAttachedToWindow) return
+        interopTeardown = false
+        if (isFocused) {
+            (parent as? ViewGroup)?.requestChildFocus(this, this)
+        }
+    }
+
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
+        interopTeardown = false
         // Always hide IME when view is detached to prevent SHOW_FORCED from keeping keyboard
         // open after the app/activity is destroyed
         hideIme()
@@ -1323,9 +1410,13 @@ internal class ImeInputView(
         // Capture, then `grep ImeInputView /sdcard/Download/haven-logcat.txt`.
         const val TAG = "ImeInputView"
 
-        // Refocus after warm return must land AFTER the first frame, where
-        // Compose flushes deferred composition disposal (the crash window
-        // described at onWindowVisibilityChanged). ~6 frames of margin.
+        // How long after the window returns the terminal waits before taking
+        // focus (and so the keyboard) back. It was chosen to clear the frame
+        // on which Compose flushes deferred composition disposal; a Xiaomi
+        // Mi 17 showed that flush arriving well after 100ms, so the crash
+        // guard now lives in onInteropReset and this is a UX delay only —
+        // long enough not to fight the returning window, short enough that
+        // the keyboard feels immediate.
         const val REFOCUS_DELAY_MS = 100L
 
         /**

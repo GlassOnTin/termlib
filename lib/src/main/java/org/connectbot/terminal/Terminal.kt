@@ -768,21 +768,21 @@ internal fun TerminalWithAccessibility(
             ?: remember { kotlinx.coroutines.flow.MutableStateFlow("") }
         ).collectAsState()
 
-    // Cleanup IME when component is disposed. Drop focus first (via the
-    // FOCUSABLE flag, which clears focus without the clearFocus() re-focus
-    // bounce): a focused interop child at removeAllViewsInLayout() time makes
-    // ViewGroup re-enter the disposing Compose hierarchy via
-    // rootViewRequestFocus() (crashes on HyperOS/Android 16; see
-    // ImeInputView.onWindowVisibilityChanged). The view never outlives this
-    // effect, so it stays unfocusable.
+    // Cleanup IME when component is disposed. Leave the focus chain first: a
+    // focused interop child at removeAllViewsInLayout() time makes ViewGroup
+    // re-enter the disposing Compose hierarchy via rootViewRequestFocus()
+    // (crashes on HyperOS/Android 16). This used to drop the FOCUSABLE flag
+    // here, which is not safe during a disposal — View.setFlags gives focus up
+    // by calling the public clearFocus(), and that calls rootViewRequestFocus()
+    // itself. ImeInputView.onInteropReset() is the version that doesn't.
     DisposableEffect(imeInputView) {
         // Capture the key's value: onDispose reading the `imeInputView` state
         // directly would act on the NEW view when the key changes null→view,
-        // marking it unfocusable at creation.
+        // tearing down its focus at creation.
         val disposingView = imeInputView
         onDispose {
             Log.d("Terminal", "Disposing Terminal - hiding IME")
-            disposingView?.isFocusable = false
+            disposingView?.onInteropReset()
             disposingView?.hideIme()
         }
     }
@@ -3067,7 +3067,10 @@ internal fun TerminalWithAccessibility(
                             ) {
                                 resetImeBuffer()
                             }
-                            keyboardHandler.onKeyEvent(
+                            // this.keyboardHandler, not the captured one: a
+                            // reused node keeps the View but gets a fresh
+                            // handler through the update block below.
+                            this.keyboardHandler.onKeyEvent(
                                 androidx.compose.ui.input.key.KeyEvent(event),
                             )
                         }
@@ -3075,10 +3078,26 @@ internal fun TerminalWithAccessibility(
                         imeInputView = this
                     }
                 },
+                // Compose calls this immediately before
+                // AndroidViewHolder.removeAllViewsInLayout() — same stack
+                // frame — so it is the one point where the interop view is
+                // guaranteed to be unfocused at removal time, whatever the
+                // device's frame timing. A focused child there sends
+                // ViewGroup down rootViewRequestFocus() back into the
+                // half-disposed Compose hierarchy, which is the HyperOS /
+                // Android 16 warm-return crash.
+                onReset = { view -> view.onInteropReset() },
+                onRelease = { view -> view.onInteropReset() },
                 update = { view ->
+                    // Refreshed here rather than captured in the factory:
+                    // supplying onReset makes this a reusable Compose node, and
+                    // a reused node does not re-run the factory.
+                    view.keyboardHandler = keyboardHandler
+                    imeInputView = view
                     view.allowStandardKeyboard = allowStandardKeyboard
                     view.rawKeyboardMode = rawKeyboardMode
                     view.customImeFlags = customImeFlags
+                    view.onInteropUpdate()
                 },
                 modifier = Modifier
                     .size(1.dp)
