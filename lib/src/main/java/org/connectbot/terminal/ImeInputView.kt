@@ -197,6 +197,11 @@ internal class ImeInputView(
             removeCallbacks(restoreFocusRunnable)
             isFocusableInTouchMode = true // also restores isFocusable
         }
+        // A show request is the other point where a broken chain is visible:
+        // requestFocus() returns true for a view that already believes it is
+        // focused, so the IME would be shown against a chain that does not
+        // point here and the keystrokes would go nowhere.
+        repairFocusChain("showIme")
         if (requestFocus()) {
             inputMethodManager.showSoftInput(this, showImeFlags())
         }
@@ -278,7 +283,36 @@ internal class ImeInputView(
             }
         } else if (!isFocusable) {
             postDelayed(restoreFocusRunnable, REFOCUS_DELAY_MS)
+        } else {
+            repairFocusChain("window visible")
         }
+    }
+
+    /**
+     * Put this view back in its parents' focus record when the two disagree.
+     *
+     * [onInteropReset] deliberately breaks the chain while keeping this view's
+     * own focus flag, and counts on either the re-add (`addViewInner` restores
+     * a re-added child that still has focus) or [onInteropUpdate] to put it
+     * back. Neither runs if the teardown never detached the view and no
+     * recomposition followed — and the result is silent and total: the view
+     * believes it holds focus, so nothing re-requests it; the parent chain does
+     * not record it, so the IME's input goes nowhere. Reported as "keys stop
+     * reaching the terminal after a reconnect, until I disconnect and
+     * reconnect", which rebuilds the session and hides it.
+     *
+     * The disagreement is cheap to detect and unambiguous, so repair it at
+     * every point the view could notice: this is a targeted `requestChildFocus`
+     * on the parent, not a focus search, so it cannot reach the root or
+     * re-enter a disposing hierarchy.
+     */
+    private fun repairFocusChain(why: String) {
+        if (!isFocused) return
+        val group = parent as? ViewGroup ?: return
+        if (group.focusedChild === this) return
+        Log.d(TAG, "focus chain broken ($why) — repairing")
+        interopTeardown = false
+        group.requestChildFocus(this, this)
     }
 
     /**

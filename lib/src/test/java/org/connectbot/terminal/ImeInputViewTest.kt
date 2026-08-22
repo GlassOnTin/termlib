@@ -1561,6 +1561,57 @@ class ImeInputViewTest {
         }
     }
 
+    /**
+     * The failure the self-heal exists for: a teardown that neither detached
+     * the view nor was followed by an update leaves the view believing it holds
+     * focus while its parent does not record it. Nothing re-requests focus (the
+     * view thinks it has it) and the IME's input reaches nobody — reported as
+     * "keys stop going to the terminal after a reconnect".
+     */
+    @Test
+    fun testWindowVisibleRepairsABrokenFocusChain() {
+        val f = interopFixture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            f.view.requestFocus()
+            f.view.onInteropReset()
+            assertNull("precondition: chain broken", f.holder.focusedChild)
+            assertTrue("precondition: view still believes it is focused", f.view.isFocused)
+
+            // No detach, no update — just the window coming back.
+            f.view.dispatchWindowVisibilityChanged(View.VISIBLE)
+
+            assertSame("chain repaired on window-visible", f.view, f.holder.focusedChild)
+        }
+    }
+
+    @Test
+    fun testShowImeRepairsABrokenFocusChain() {
+        val f = interopFixture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            f.view.requestFocus()
+            f.view.onInteropReset()
+            assertNull("precondition: chain broken", f.holder.focusedChild)
+
+            f.view.showIme()
+
+            assertSame("chain repaired by showIme", f.view, f.holder.focusedChild)
+        }
+    }
+
+    /** The repair must not invent focus for a view that never had it. */
+    @Test
+    fun testRepairDoesNotStealFocusForAnUnfocusedView() {
+        val f = interopFixture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            f.canary.requestFocus()
+
+            f.view.dispatchWindowVisibilityChanged(View.VISIBLE)
+
+            assertTrue("unrelated focus left alone", f.canary.isFocused)
+            assertFalse(f.view.isFocused)
+        }
+    }
+
     @Test
     fun testInteropUpdateIsANoOpOutsideATeardown() {
         val f = interopFixture()
