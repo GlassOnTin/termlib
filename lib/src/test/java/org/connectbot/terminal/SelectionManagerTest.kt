@@ -759,4 +759,62 @@ class SelectionManagerTest {
         assertEquals(3, range.endRow)
         assertEquals(4, range.endCol)
     }
+
+    /**
+     * The highlight and the clipboard must agree on which cells are selected.
+     *
+     * [SelectionRange.contains] — what gets drawn — is anchor-aware: on the
+     * first row it takes everything from the START anchor's column, and on the
+     * last row everything up to the END anchor's column. `getSelectedText` used
+     * `minOf`/`maxOf` on the two columns instead, which is the same answer only
+     * when the drag happens to go down-and-right.
+     *
+     * Drag DOWN and LEFT and they disagree: here the user selects from row 0
+     * col 8 to row 1 col 2, so the highlight covers "IJ" then "abc", but the
+     * extraction took min(8,2)=2 on the first row and max(8,2)=8 on the last,
+     * copying "CDEFGHIJ" then "abcdefghi" — text the user never highlighted.
+     */
+    @Test
+    fun testSelectedTextMatchesHighlightWhenDraggedDownAndLeft() {
+        val snapshot = makeSnapshotWithScrollback(
+            scrollbackText = emptyList(),
+            screenText = listOf("ABCDEFGHIJ", "abcdefghij"),
+            cols = 10,
+        )
+
+        selectionManager.startSelection(0, 8, cols = 10, mode = SelectionMode.CHARACTER)
+        selectionManager.updateSelection(1, 2)
+        selectionManager.endSelection()
+
+        val range = selectionManager.selectionRange!!
+
+        // What the user sees highlighted, read straight off the drawing predicate.
+        val highlighted = (0..1).joinToString("\n") { row ->
+            (0..9).filter { col -> range.contains(row, col) }
+                .joinToString("") { col -> "ABCDEFGHIJabcdefghij"[row * 10 + col].toString() }
+        }
+        assertEquals("IJ\nabc", highlighted)
+
+        // What actually reaches the clipboard must be the same text.
+        assertEquals(highlighted, selectionManager.getSelectedText(snapshot, scrollbackPosition = 0))
+    }
+
+    /** The down-and-right drag that already worked must keep working. */
+    @Test
+    fun testSelectedTextMatchesHighlightWhenDraggedDownAndRight() {
+        val snapshot = makeSnapshotWithScrollback(
+            scrollbackText = emptyList(),
+            screenText = listOf("ABCDEFGHIJ", "abcdefghij"),
+            cols = 10,
+        )
+
+        selectionManager.startSelection(0, 2, cols = 10, mode = SelectionMode.CHARACTER)
+        selectionManager.updateSelection(1, 8)
+        selectionManager.endSelection()
+
+        assertEquals(
+            "CDEFGHIJ\nabcdefghi",
+            selectionManager.getSelectedText(snapshot, scrollbackPosition = 0),
+        )
+    }
 }
