@@ -152,16 +152,66 @@ class ImeInputViewTest {
     }
 
     @Test
-    fun testSendBackspaceKeyDownDoesNotClearEditable() {
-        // #99: Gboard needs accumulated chars in Editable to route autocorrect
-        // via setComposingRegion. Clearing on every backspace drops the IME
-        // into per-char insert mode. Editable is cleared only on Enter.
+    fun testSendBackspaceKeyDownShrinksEditableByOne() {
+        // Gboard Telex reads getTextBeforeCursor. A terminal DEL that leaves
+        // the Editable stale makes the next syllable compose onto the deleted
+        // word (độc deleted on screen, Gboard still sees độc). Shrink one
+        // code point — do not wipe the whole buffer (#99).
         val ic = makeView().ic(composeMode = true)
         ic.commitText("abc", 1)
 
         ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
 
-        assertEquals("abc", ic.getEditable()?.toString())
+        assertEquals("ab", ic.getEditable()?.toString())
+    }
+
+    @Test
+    fun testRepeatedDelDownShrinksEntireBufferWithoutKeyUp() {
+        // Gboard hold-backspace is a stream of ACTION_DOWN. Restarting the IME
+        // on a word boundary used to abort that stream after a few characters.
+        val ic = makeView().ic(composeMode = true)
+        ic.commitText("abcdefghij", 1)
+
+        repeat(10) {
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+        }
+
+        assertEquals("", ic.getEditable()?.toString())
+    }
+
+    @Test
+    fun testSendBackspaceUntilWordGoneClearsEditable() {
+        val ic = makeView().ic(composeMode = true)
+        ic.commitText("độc", 1)
+
+        repeat(3) {
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+        }
+
+        assertEquals("", ic.getEditable()?.toString())
+        assertEquals("", ic.getTextBeforeCursor(20, 0)?.toString())
+    }
+
+    @Test
+    fun testDeleteSurroundingTextDoesNotDoubleDeleteEditable() {
+        val ic = makeView().ic(composeMode = true)
+        ic.commitText("abc", 1)
+
+        ic.deleteSurroundingText(1, 0)
+
+        assertEquals("ab", ic.getEditable()?.toString())
+    }
+
+    @Test
+    fun testDeletingWordLeavesPrecedingTokenInEditable() {
+        val ic = makeView().ic(composeMode = true)
+        ic.commitText("ls độc", 1)
+
+        repeat(3) {
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+        }
+
+        assertEquals("ls ", ic.getEditable()?.toString())
     }
 
     @Test
@@ -228,10 +278,10 @@ class ImeInputViewTest {
         val updatesBeforeDel = updates.size
         ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
 
-        // Any new update from the DEL must not be the reset signal.
+        // Mid-word backspace must not look like Enter.
         val newUpdates = updates.drop(updatesBeforeDel)
         assertTrue(
-            "Backspace should not reset IME selection to (0,0,-1,-1)",
+            "Mid-word backspace should not reset IME selection to (0,0,-1,-1)",
             newUpdates.none { it.selStart == 0 && it.selEnd == 0 && it.candidatesStart == -1 && it.candidatesEnd == -1 },
         )
     }
@@ -649,22 +699,104 @@ class ImeInputViewTest {
     }
 
     /**
-     * Gboard sends via commitText AND fires a concurrent raw view event. The commitText
-     * path delivers the character; the raw view event is independent. Two 'a's total.
+     * Gboard can deliver one logical keystroke as commitText AND a concurrent
+     * raw view event. commitText is authoritative; the raw echo is suppressed
+     * so the shell sees a single 'a'.
      */
     @Test
-    fun testTypeNullRawViewEventAndCommitTextDeliverIndependently() {
+    fun testTypeNullRawViewEventAfterCommitTextIsEchoSuppressed() {
         val (ic, view, outputs) = createNonComposeModeCapture()
 
         InstrumentationRegistry.getInstrumentation().runOnMainSync {
-            // Simulate Gboard: sends via commitText AND fires a raw view event.
-            // Each path delivers a character — two independent 'a's total.
             ic.commitText("a", 1)
             view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_A))
         }
         drainMainLooper()
 
+        assertEquals("a", effectiveText(outputs))
+    }
+
+    @Test
+    fun testTypeNullSendKeyEventAfterCommitTextIsEchoSuppressed() {
+        val (ic, _, outputs) = createNonComposeModeCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.commitText("a", 1)
+            ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_A))
+        }
+        drainMainLooper()
+
+        assertEquals("a", effectiveText(outputs))
+    }
+
+    @Test
+    fun testTypeNullPostedRawKeyAfterCommitTextIsEchoSuppressed() {
+        val (ic, view, outputs) = createNonComposeModeCapture()
+        val main = android.os.Handler(android.os.Looper.getMainLooper())
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.commitText("a", 1)
+            main.post {
+                view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_A))
+            }
+        }
+        drainMainLooper()
+
+        assertEquals("a", effectiveText(outputs))
+    }
+
+    @Test
+    fun testTypeNullRawKeyAfterEchoDrainIsGenuineRepeat() {
+        val (ic, view, outputs) = createNonComposeModeCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.commitText("a", 1)
+        }
+        drainMainLooper()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_A))
+        }
+        drainMainLooper()
+
         assertEquals("aa", effectiveText(outputs))
+    }
+
+    @Test
+    fun testTypeNullCommitTextAaPreservesBothCharacters() {
+        val (ic, _, outputs) = createNonComposeModeCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.commitText("aa", 1)
+        }
+        drainMainLooper()
+
+        assertEquals("aa", effectiveText(outputs))
+    }
+
+    @Test
+    fun testTypeNullTwoRawKeyAPreservesBothCharacters() {
+        val (_, view, outputs) = createNonComposeModeCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_A))
+            view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_A))
+        }
+        drainMainLooper()
+
+        assertEquals("aa", effectiveText(outputs))
+    }
+
+    @Test
+    fun testTypeNullCommitTextAThenRawBIsNotSuppressed() {
+        val (ic, view, outputs) = createNonComposeModeCapture()
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            ic.commitText("a", 1)
+            view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_B))
+        }
+        drainMainLooper()
+
+        assertEquals("ab", effectiveText(outputs))
     }
 
     @Test

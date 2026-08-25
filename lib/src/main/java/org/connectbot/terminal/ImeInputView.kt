@@ -23,6 +23,7 @@ import android.text.Selection
 import android.util.Log
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
@@ -396,6 +397,72 @@ internal class ImeInputView(
         // Cancel any deferred Enter-fallback so a Handler callback doesn't fire
         // into a detached view after the IME committed "\n" just before teardown.
         activeConnection?.cancelPending()
+        cancelHeldDelRepeat()
+    }
+
+    /**
+     * Gboard can deliver one logical keystroke as [InputConnection.commitText]
+     * *and* a raw [KeyEvent] on this view. [TerminalInputConnection] records
+     * the committed printable chars; matching ACTION_DOWN events in the same
+     * looper message are consumed here so [setOnKeyListener] never sees the
+     * echo. Physical keys and a second genuine "a" do not match an empty
+     * queue and still reach the listener.
+     */
+    /**
+     * Gboard Vietnamese often stops generating DEL after the current
+     * syllable even while the user is still holding backspace, and
+     * restartInput() on the way through a word boundary aborts the rest.
+     * After a short silence we keep sending DEL until ACTION_UP.
+     */
+    private val heldDelRepeatRunnable = object : Runnable {
+        override fun run() {
+            activeConnection?.onUserDelKey()
+            keyboardHandler.onKeyEvent(
+                ComposeKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL)),
+            )
+            postDelayed(this, heldDelRepeatIntervalMs)
+        }
+    }
+
+    private val heldDelRepeatIntervalMs: Long
+        get() = ViewConfiguration.getKeyRepeatDelay().toLong().coerceIn(40L, 80L)
+
+    private val heldDelTakeoverMs: Long
+        get() = 120L
+
+    private fun scheduleHeldDelRepeat() {
+        removeCallbacks(heldDelRepeatRunnable)
+        postDelayed(heldDelRepeatRunnable, heldDelTakeoverMs)
+    }
+
+    private fun cancelHeldDelRepeat() {
+        removeCallbacks(heldDelRepeatRunnable)
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_DEL) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                // User backspace (IME sendKeyEvent or raw view key). Keep the
+                // Editable in lock-step with the terminal so Gboard Telex does
+                // not keep composing against characters the shell already
+                // deleted. Autocorrect sendBackspaces() bypasses this view.
+                // Never restartInput while DEL is down or up-from-hold:
+                // that tears down Gboard's repeat.
+                activeConnection?.onUserDelKey()
+                // deleteSurroundingText synthesizes DEL downs with no matching
+                // UP; do not start a hold-repeat from those or we keep deleting
+                // after the user lifts their finger.
+                if (activeConnection?.suppressEditableDeleteForDel != true) {
+                    scheduleHeldDelRepeat()
+                }
+            } else if (event.action == KeyEvent.ACTION_UP) {
+                cancelHeldDelRepeat()
+            }
+        }
+        if (activeConnection?.consumeSameMessagePrintableEcho(event) == true) {
+            return true
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
@@ -582,8 +649,8 @@ internal class ImeInputView(
          * actually advances.
          */
         private fun notifyImeSelection() {
-            if (!fullEditor) return
             val ed = editable ?: return
+            if (!fullEditor && ed.isEmpty()) return
             inputMethodManager.updateSelection(
                 this@ImeInputView,
                 Selection.getSelectionStart(ed),
@@ -950,9 +1017,16 @@ internal class ImeInputView(
             }
 
             // No composition active — this is a real backspace through the IME,
-            // dispatch it to the terminal.
-            for (i in 0 until bounded) {
-                sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+            // dispatch it to the terminal. sendKeyEvent(DEL) also reaches
+            // dispatchKeyEvent; skip the Editable shrink there so
+            // super.deleteSurroundingText is the single editor update.
+            suppressEditableDeleteForDel = true
+            try {
+                for (i in 0 until bounded) {
+                    sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+                }
+            } finally {
+                suppressEditableDeleteForDel = false
             }
 
             // TODO: Implement forward delete if rightLength > 0
@@ -966,12 +1040,33 @@ internal class ImeInputView(
         // our sendTextInput() both sending the same characters.
         private var suppressKeyEvents = false
 
+        // deleteSurroundingText already updates the Editable via super; a
+        // nested sendKeyEvent(DEL) must not delete a second character.
+        internal var suppressEditableDeleteForDel = false
+
         // Chars committed eagerly via setComposingText (Secure mode) that
         // Samsung Keyboard will re-fire later as sendKeyEvent on its
         // batch-flush (space/enter). Each entry consumes exactly one
         // matching ACTION_DOWN. ACTION_UP is harmless — KeyboardHandler
         // only acts on KeyDown — so we let it through. (#110)
         private val pendingSuppressChars: ArrayDeque<Char> = ArrayDeque()
+
+        // Printable ASCII committed via sendTextInput. Matching raw View /
+        // sendKeyEvent ACTION_DOWN is the Gboard commitText+key echo.
+        // Drain is posted *twice* so a key Gboard queues later in this
+        // same message (after we post the drain) still sees the queue;
+        // a later IPC / keystroke runs after the drain and is genuine.
+        // Separate from pendingSuppressChars (#110 Samsung batch re-fire).
+        private val committedThisMessage: ArrayDeque<Char> = ArrayDeque()
+        private var echoDrainPosted = false
+        private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        private val echoDrainRunnable = Runnable {
+            committedThisMessage.clear()
+            echoDrainPosted = false
+        }
+        private val echoDrainScheduler = Runnable {
+            handler.post(echoDrainRunnable)
+        }
 
         /**
          * Derive a printable codepoint from a KeyEvent for suppression
@@ -997,7 +1092,61 @@ internal class ImeInputView(
             }
         }
 
-        private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        /**
+         * User-facing backspace reached the view. Shrink the Editable by one
+         * code point so Gboard's getTextBeforeCursor matches the terminal.
+         * sendBackspaces() (autocorrect) never comes through here.
+         */
+        internal fun onUserDelKey() {
+            if (suppressEditableDeleteForDel) return
+            deleteOneCodePointFromEditable()
+        }
+
+        private fun deleteOneCodePointFromEditable() {
+            val ed = editable ?: return
+            if (ed.isEmpty()) return
+            var end = Selection.getSelectionStart(ed)
+            if (end < 0) end = ed.length
+            if (end <= 0) return
+            val start =
+                if (end >= 2 && Character.isSurrogatePair(ed[end - 2], ed[end - 1])) {
+                    end - 2
+                } else {
+                    end - 1
+                }
+            ed.delete(start, end)
+            notifyImeSelection()
+        }
+
+        /**
+         * True when [event] is the raw-view echo of printable text this
+         * connection just committed in the current looper message.
+         */
+        internal fun consumeSameMessagePrintableEcho(event: KeyEvent): Boolean {
+            if (event.action != KeyEvent.ACTION_DOWN) return false
+            if (committedThisMessage.isEmpty()) return false
+            val incoming = effectiveCharCode(event)
+            if (incoming == 0) return false
+            if (committedThisMessage.first().code == incoming) {
+                committedThisMessage.removeFirst()
+                return true
+            }
+            // Different printable key: this is a new keystroke, not the echo.
+            committedThisMessage.clear()
+            return false
+        }
+
+        private fun rememberCommittedPrintableEcho(text: String) {
+            for (ch in text) {
+                if (ch.code in 0x20..0x7E) {
+                    committedThisMessage.addLast(ch)
+                }
+            }
+            if (committedThisMessage.isNotEmpty() && !echoDrainPosted) {
+                echoDrainPosted = true
+                handler.post(echoDrainScheduler)
+            }
+        }
 
         // Enter deduplication: commitText("\n") always defers to sendKeyEvent.
         // If sendKeyEvent(ENTER) arrives (from the same IME action), we cancel
@@ -1100,6 +1249,7 @@ internal class ImeInputView(
                 // Real Enter from IME — cancel any deferred commitText Enter
                 enterHandledByKeyEvent = true
                 handler.removeCallbacks(enterFallbackRunnable)
+                this@ImeInputView.cancelHeldDelRepeat()
                 // #298: send any in-flight composition to the shell before the
                 // newline, so a still-composing line isn't lost / delivered late.
                 flushComposingBeforeEnter()
@@ -1350,6 +1500,7 @@ internal class ImeInputView(
 
         private fun sendTextInput(text: String) {
             if (text.isNotEmpty()) {
+                rememberCommittedPrintableEcho(text)
                 keyboardHandler.onTextInput(text.toByteArray(Charsets.UTF_8))
             }
         }
@@ -1361,7 +1512,11 @@ internal class ImeInputView(
          */
         internal fun cancelPending() {
             handler.removeCallbacks(enterFallbackRunnable)
+            handler.removeCallbacks(echoDrainScheduler)
+            handler.removeCallbacks(echoDrainRunnable)
             enterHandledByKeyEvent = false
+            echoDrainPosted = false
+            committedThisMessage.clear()
         }
 
         /** Drop in-flight composition state without touching the terminal output. */
@@ -1374,6 +1529,10 @@ internal class ImeInputView(
             // typed after a mode-change restartInput. Clear with the rest
             // of the per-connection state.
             pendingSuppressChars.clear()
+            handler.removeCallbacks(echoDrainScheduler)
+            handler.removeCallbacks(echoDrainRunnable)
+            committedThisMessage.clear()
+            echoDrainPosted = false
         }
 
         /**
