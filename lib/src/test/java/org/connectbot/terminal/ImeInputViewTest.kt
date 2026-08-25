@@ -1788,4 +1788,124 @@ class ImeInputViewTest {
             assertFalse("unfocused while hidden", f.view.isFocused)
         }
     }
+
+    // ---------- held-DEL takeover bounds ----------
+
+    /** DEL bytes delivered to the terminal so far. */
+    private fun delCount(outputs: List<ByteArray>): Int =
+        outputs.flatMap { it.toList() }.count { it == 0x7F.toByte() }
+
+    /**
+     * A capture whose view is attached to a real window and focusable.
+     * The takeover reposts itself with [View.postDelayed], which on a view
+     * with no attached window goes to the run queue and never fires — so an
+     * unattached fixture silently proves nothing about it.
+     */
+    private class AttachedCapture(context: Context) {
+        val outputs = mutableListOf<ByteArray>()
+        val view: ImeInputView
+        val sibling: View
+
+        init {
+            val emulator = TerminalEmulatorFactory.create(
+                initialRows = 24,
+                initialCols = 80,
+                onKeyboardInput = { data -> outputs.add(data.copyOf()) },
+            )
+            val handler = KeyboardHandler(emulator)
+            view = ImeInputView(context, handler)
+            sibling = View(context).apply { isFocusableInTouchMode = true }
+            val root = android.widget.LinearLayout(context).apply {
+                addView(view, android.view.ViewGroup.LayoutParams(SIZE, SIZE))
+                addView(sibling, android.view.ViewGroup.LayoutParams(SIZE, SIZE))
+            }
+            val activity = org.robolectric.Robolectric
+                .buildActivity(android.app.Activity::class.java).setup().get()
+            activity.setContentView(root)
+            // A zero-sized view cannot take focus once layout is valid.
+            listOf(root, view, sibling).forEach { it.layout(0, 0, SIZE, SIZE) }
+            view.onCreateInputConnection(EditorInfo())
+        }
+
+        private companion object {
+            const val SIZE = 16
+        }
+    }
+
+    private fun attachedCapture(): AttachedCapture {
+        var c: AttachedCapture? = null
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            c = AttachedCapture(context)
+        }
+        return c!!
+    }
+
+    /** Start a hold and let the takeover get going. Returns the DEL count. */
+    private fun startHeldDelTakeover(c: AttachedCapture): Int {
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            // A bare down with no up. deleteSurroundingText is excluded from
+            // starting a takeover; an IME that does this another way is not.
+            c.view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+        }
+        advanceMainLooper(1_000)
+        val running = delCount(c.outputs)
+        assertTrue("precondition: the takeover is repeating", running > 1)
+        return running
+    }
+
+    /**
+     * The held-DEL takeover keeps sending backspaces after the IME goes quiet,
+     * which is what a Gboard hold needs. Nothing it sends is reversible, so it
+     * must not ride a missing ACTION_UP forever.
+     */
+    @Test
+    fun testHeldDelTakeoverStopsAtItsBound() {
+        val c = attachedCapture()
+        startHeldDelTakeover(c)
+
+        advanceMainLooper(ImeInputView.HELD_DEL_MAX_TAKEOVER_MS)
+        val settled = delCount(c.outputs)
+        advanceMainLooper(3_000)
+
+        assertEquals(
+            "held-DEL takeover kept deleting past its bound",
+            settled,
+            delCount(c.outputs),
+        )
+    }
+
+    /** The ordinary end: the key comes up and the takeover stops with it. */
+    @Test
+    fun testHeldDelTakeoverStopsOnKeyUp() {
+        val c = attachedCapture()
+        startHeldDelTakeover(c)
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            c.view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
+        }
+        val atKeyUp = delCount(c.outputs)
+        advanceMainLooper(2_000)
+
+        assertEquals("takeover continued after ACTION_UP", atKeyUp, delCount(c.outputs))
+    }
+
+    /** Focus moving away means no ACTION_UP is coming to this view. */
+    @Test
+    fun testHeldDelTakeoverStopsWhenFocusIsLost() {
+        val c = attachedCapture()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            assertTrue("precondition: view focused", c.view.requestFocus())
+        }
+        startHeldDelTakeover(c)
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync { c.view.clearFocus() }
+        val atFocusLoss = delCount(c.outputs)
+        advanceMainLooper(2_000)
+
+        assertEquals(
+            "takeover continued after the view lost focus",
+            atFocusLoss,
+            delCount(c.outputs),
+        )
+    }
 }

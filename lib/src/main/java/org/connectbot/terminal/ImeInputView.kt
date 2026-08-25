@@ -18,6 +18,8 @@ package org.connectbot.terminal
 
 import android.content.Context
 import android.content.res.Configuration
+import android.graphics.Rect
+import android.os.SystemClock
 import android.text.Editable
 import android.text.Selection
 import android.util.Log
@@ -269,6 +271,8 @@ internal class ImeInputView(
             // A restore pending from a brief show must not fire while hidden —
             // it would re-arm the crash for the next warm return.
             removeCallbacks(restoreFocusRunnable)
+            // No key up is coming for a backspace held as the window goes away.
+            cancelHeldDelRepeat()
             // Not during a Compose interop teardown: the detach that follows
             // [onInteropReset] dispatches GONE from inside
             // removeAllViewsInLayout(), and dropping FOCUSABLE there would run
@@ -401,21 +405,28 @@ internal class ImeInputView(
     }
 
     /**
-     * Gboard can deliver one logical keystroke as [InputConnection.commitText]
-     * *and* a raw [KeyEvent] on this view. [TerminalInputConnection] records
-     * the committed printable chars; matching ACTION_DOWN events in the same
-     * looper message are consumed here so [setOnKeyListener] never sees the
-     * echo. Physical keys and a second genuine "a" do not match an empty
-     * queue and still reach the listener.
-     */
-    /**
      * Gboard Vietnamese often stops generating DEL after the current
      * syllable even while the user is still holding backspace, and
      * restartInput() on the way through a word boundary aborts the rest.
      * After a short silence we keep sending DEL until ACTION_UP.
+     *
+     * The takeover is bounded, because nothing downstream of it is
+     * reversible: these DELs go to a shell. It ends on ACTION_UP, on Enter,
+     * on losing focus, on the window going away, on detach — and if none of
+     * those arrive, after [HELD_DEL_MAX_TAKEOVER_MS]. The case that bound
+     * exists for is an IME that sends a bare DEL down with no matching up;
+     * `deleteSurroundingText` is one such source and is excluded explicitly
+     * below, but it is unlikely to be the only one.
      */
+    private var heldDelRepeatUntil = 0L
+
     private val heldDelRepeatRunnable = object : Runnable {
         override fun run() {
+            if (SystemClock.uptimeMillis() >= heldDelRepeatUntil) {
+                Log.d(TAG, "held-DEL takeover stopped at its " +
+                    "${HELD_DEL_MAX_TAKEOVER_MS}ms bound; no key up arrived")
+                return
+            }
             activeConnection?.onUserDelKey()
             keyboardHandler.onKeyEvent(
                 ComposeKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL)),
@@ -432,13 +443,32 @@ internal class ImeInputView(
 
     private fun scheduleHeldDelRepeat() {
         removeCallbacks(heldDelRepeatRunnable)
+        // Each real DEL down pushes the deadline out, so a genuine hold that
+        // keeps producing events is never cut short; the bound only limits
+        // how long we go on deleting with nothing arriving at all.
+        heldDelRepeatUntil = SystemClock.uptimeMillis() + HELD_DEL_MAX_TAKEOVER_MS
         postDelayed(heldDelRepeatRunnable, heldDelTakeoverMs)
     }
 
     private fun cancelHeldDelRepeat() {
         removeCallbacks(heldDelRepeatRunnable)
+        heldDelRepeatUntil = 0L
     }
 
+    override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: Rect?) {
+        super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
+        // A key held while focus moves away has no up event coming here.
+        if (!gainFocus) cancelHeldDelRepeat()
+    }
+
+    /**
+     * Gboard can deliver one logical keystroke as [InputConnection.commitText]
+     * *and* a raw [KeyEvent] on this view. [TerminalInputConnection] records
+     * the committed printable chars; matching ACTION_DOWN events in the same
+     * looper message are consumed here so [setOnKeyListener] never sees the
+     * echo. Physical keys and a second genuine "a" do not match an empty
+     * queue and still reach the listener.
+     */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode == KeyEvent.KEYCODE_DEL) {
             if (event.action == KeyEvent.ACTION_DOWN) {
@@ -1602,6 +1632,14 @@ internal class ImeInputView(
         // and what we're returning. Enable in-app via Settings → Logcat
         // Capture, then `grep ImeInputView /sdcard/Download/haven-logcat.txt`.
         const val TAG = "ImeInputView"
+
+        /**
+         * Ceiling on an unattended held-DEL takeover. Long enough for a
+         * genuine hold to clear a full command line at the repeat interval,
+         * short enough that a missing key up costs seconds rather than the
+         * life of the view.
+         */
+        const val HELD_DEL_MAX_TAKEOVER_MS = 5_000L
 
         // How long after the window returns the terminal waits before taking
         // focus (and so the keyboard) back. It was chosen to clear the frame
