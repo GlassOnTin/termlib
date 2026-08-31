@@ -1908,4 +1908,63 @@ class ImeInputViewTest {
             delCount(c.outputs),
         )
     }
+
+    // === #614: Secure mode must set VISIBLE_PASSWORD on the Samsung-gated path too ===
+    //
+    // The non-gated Secure path already pairs VISIBLE_PASSWORD with
+    // NO_SUGGESTIONS, but the Samsung-gated path (#110) set only
+    // AUTO_CORRECT | NO_SUGGESTIONS. Samsung Honeyboard honours
+    // VISIBLE_PASSWORD as the "don't rewrite / don't suggest" signal and kept
+    // showing the suggestion strip under Secure (imorourke, A15, 5.9.30.97).
+    // The gate must keep AUTO_CORRECT (its commitText dispatch requirement)
+    // AND add VISIBLE_PASSWORD.
+
+    private fun ImeInputView.secureInputType(): Int {
+        val out = EditorInfo()
+        onCreateInputConnection(out)
+        return out.inputType
+    }
+
+    @Test
+    fun testSecureModeSetsVisiblePasswordOnGatedIme() {
+        android.provider.Settings.Secure.putString(
+            context.contentResolver,
+            android.provider.Settings.Secure.DEFAULT_INPUT_METHOD,
+            "com.samsung.android.honeyboard/.service.HoneyBoardService",
+        )
+        val inputType = makeView().secureInputType()
+
+        assertTrue(
+            "gated Secure must keep AUTO_CORRECT (Samsung commitText gate, #110)",
+            inputType and EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT != 0,
+        )
+        assertTrue(
+            "gated Secure must set VISIBLE_PASSWORD — the flag that clears Samsung's suggestion bar (#614)",
+            inputType and EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD != 0,
+        )
+        assertTrue(
+            "gated Secure must keep NO_SUGGESTIONS",
+            inputType and EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS != 0,
+        )
+    }
+
+    @Test
+    fun testSecureModeSetsVisiblePasswordOnNonGatedIme() {
+        // Gboard is not in the gated package set → gate returns false → non-gated path.
+        android.provider.Settings.Secure.putString(
+            context.contentResolver,
+            android.provider.Settings.Secure.DEFAULT_INPUT_METHOD,
+            "com.google.android.inputmethod.latin/.LatinIME",
+        )
+        val inputType = makeView().secureInputType()
+
+        assertTrue(
+            "non-gated Secure must set VISIBLE_PASSWORD",
+            inputType and EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD != 0,
+        )
+        assertFalse(
+            "non-gated Secure must NOT set AUTO_CORRECT (it rewrites input on Gboard, #115)",
+            inputType and EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT != 0,
+        )
+    }
 }

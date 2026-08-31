@@ -573,9 +573,13 @@ internal class ImeInputView(
             // 1. Samsung family (gated). Samsung's InputMethodManager_LC
             //    gate (Galaxy S, Android 16) drops every commitText unless
             //    TYPE_TEXT_FLAG_AUTO_CORRECT is present (#110, SeriousM).
-            //    We pair it with NO_SUGGESTIONS to suppress the strip; the
-            //    eager-commit composing-text path keeps autocorrect from
-            //    rewriting what reaches the terminal.
+            //    We pair it with NO_SUGGESTIONS *and* VISIBLE_PASSWORD: the
+            //    eager-commit composing-text path keeps AUTO_CORRECT from
+            //    rewriting what reaches the terminal, but Samsung Honeyboard
+            //    ignores NO_SUGGESTIONS for the suggestion strip and only
+            //    clears it on VISIBLE_PASSWORD (#614, imorourke — A15,
+            //    Honeyboard 5.9.30.97). The reporter confirmed the two flags
+            //    coexist: the strip stays gone and input still dispatches.
             //
             // 2. Everything else (Gboard, FUTO, Heliboard, Huawei Celia,
             //    ...). NO_SUGGESTIONS alone is *not* enough: Gboard hides
@@ -597,6 +601,7 @@ internal class ImeInputView(
             val needsAutoCorrectGate = isAutoCorrectGatedIme(context)
             outAttrs.inputType = if (needsAutoCorrectGate) {
                 EditorInfo.TYPE_CLASS_TEXT or
+                    EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
                     EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS or
                     EditorInfo.TYPE_TEXT_FLAG_AUTO_CORRECT
             } else {
