@@ -230,6 +230,18 @@ sealed interface TerminalEmulator : AutoCloseable {
     fun isAltScreenActive(): Boolean
 
     /**
+     * Reactive terminal window title (empty when the running program has
+     * never set one). Fed by OSC 0 / OSC 2 — libvterm surfaces both as
+     * VTERM_PROP_TITLE through [TerminalCallbacks.setTermProp]. OSC 1 is
+     * the icon name and intentionally does not update this. Consumers
+     * (e.g. Haven's tab label, #625) collect this instead of intercepting
+     * the OSC sequences themselves — stripping them from the byte stream
+     * would starve the emulator's own title tracking, which backs
+     * [AgentSnapshot.terminalTitle].
+     */
+    val terminalTitle: StateFlow<String>
+
+    /**
      * Build a primitive-typed snapshot of the current terminal state for
      * agent / automation transports. The internal `TerminalSnapshot`
      * (and its `TerminalLine` / `SemanticSegment` collaborators) stay
@@ -441,6 +453,12 @@ internal class TerminalEmulatorImpl(
     // Sequence number for ordering snapshots
     private var sequenceNumber = 0L
 
+    // Terminal window title (VTERM_PROP_TITLE). Emitted independently of the
+    // snapshot so title-only changes (#625) reach consumers without a full
+    // screen recomposition.
+    private val _terminalTitle = MutableStateFlow("")
+    override val terminalTitle: StateFlow<String> = _terminalTitle.asStateFlow()
+
     // Terminal dimensions
     override val dimensions: TerminalDimensions
         get() = TerminalDimensions(rows = rows, columns = cols)
@@ -463,7 +481,7 @@ internal class TerminalEmulatorImpl(
     private var altScreenActive = false
 
     // Terminal properties
-    private var terminalTitle = ""
+    private var terminalTitleText = ""
 
     // Scrollback buffer
     private val scrollback = mutableListOf<TerminalLine>()
@@ -807,9 +825,10 @@ internal class TerminalEmulatorImpl(
         synchronized(damageLock) {
             when (value) {
                 is TerminalProperty.StringValue -> {
-                    // Property 7 is VTERM_PROP_TITLE (from vterm.h line 257)
-                    if (prop == 7) {
-                        terminalTitle = value.value
+                    // Property 4 is VTERM_PROP_TITLE (vterm.h:257; 7 is MOUSE)
+                    if (prop == 4) {
+                        terminalTitleText = value.value
+                        _terminalTitle.value = value.value
                         propertyChanged = true
                     }
                 }
@@ -1407,7 +1426,7 @@ internal class TerminalEmulatorImpl(
             cursorVisible = cursorVisible,
             cursorShape = cursorShape,
             cursorBlink = cursorBlink,
-            terminalTitle = terminalTitle,
+            terminalTitle = terminalTitleText,
             rows = rows,
             cols = cols,
             altScreen = altScreenActive,
